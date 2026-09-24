@@ -303,14 +303,13 @@ def test_escrow_withdrawal_cannot_touch_reserved_bounty(critical, direct_vm, dir
     warp_to(direct_vm, t0 + ESCROW_CLOSURE_NOTICE)
     # The open incident still pins the escrow...
     with direct_vm.expect_revert("ERR_UNRESOLVED_INCIDENTS"):
-        contract.withdraw_bounty_escrow(dao_id, free)
-    # ...until it settles; the reservation itself is never withdrawable.
+        contract.withdraw_bounty_escrow(dao_id)
+    # ...until it settles; the paid reservation is gone from the position.
     contract.claim_payout(incident_id)
     direct_vm.sender = direct_alice
-    with direct_vm.expect_revert("ERR_INVALID_INPUT"):
-        contract.withdraw_bounty_escrow(dao_id, free + 1)
-    contract.withdraw_bounty_escrow(dao_id, free)
+    assert int(contract.withdraw_bounty_escrow(dao_id)) == free
     assert int(contract.get_incident(incident_id)["reserved_bounty"]) == 5 * ATTO
+    assert int(contract.get_dao(dao_id)["bounty_escrow"]) == 0
     assert_solvent(contract)
 
 
@@ -420,7 +419,7 @@ def test_exact_ledger_accounting_across_full_game(
     direct_vm.sender = direct_alice
     contract.request_escrow_closure(dao_id)
     warp_to(direct_vm, t0 + CHALLENGE_WINDOW + ESCROW_CLOSURE_NOTICE)
-    contract.withdraw_bounty_escrow(dao_id, int(contract.get_dao(dao_id)["bounty_escrow"]))
+    contract.withdraw_bounty_escrow(dao_id)
 
     final = step()
     assert int(final["total_deposited"]) == 0

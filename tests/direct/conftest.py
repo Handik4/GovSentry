@@ -155,12 +155,16 @@ def proposal_details_result(actions: list, description_hash: bytes) -> str:
 REVERTED = {"code": 3, "message": "execution reverted"}
 
 
+PENDING, ACTIVE, CANCELED, DEFEATED, SUCCEEDED, QUEUED, EXPIRED, EXECUTED = range(8)
+
+
 def mock_proposal(direct_vm, proposal_id: int, actions: list, description: str,
                   logs: list | None = None, oz: bool = False,
-                  description_hash: bytes | None = None) -> None:
+                  description_hash: bytes | None = None, state: int | None = ACTIVE) -> None:
     """Governor state for one proposal: stored actions + its ProposalCreated
-    log. Bravo serves getActions (empty arrays for unknown ids) and has no
-    proposalDetails; OpenZeppelin GovernorStorage is the reverse."""
+    log + state(). Bravo serves getActions (empty arrays for unknown ids) and
+    has no proposalDetails; OpenZeppelin GovernorStorage is the reverse.
+    state=None makes state() revert."""
     if logs is None:
         logs = [proposal_created_log(proposal_id, actions, description)]
     if oz:
@@ -174,6 +178,10 @@ def mock_proposal(direct_vm, proposal_id: int, actions: list, description: str,
             {"jsonrpc": "2.0", "id": 0, "result": get_actions_result(actions)},
             {"jsonrpc": "2.0", "id": 1, "error": REVERTED},
         ]
+    if state is None:
+        replies.append({"jsonrpc": "2.0", "id": 3, "error": REVERTED})
+    else:
+        replies.append({"jsonrpc": "2.0", "id": 3, "result": "0x" + format(state, "064x")})
     # Replies may arrive out of order; the contract matches them by id.
     mock_rpc(direct_vm, [{"jsonrpc": "2.0", "id": 2, "result": logs}, *replies])
 

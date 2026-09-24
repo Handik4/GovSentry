@@ -69,8 +69,15 @@ def fee_options(client):
 
 
 def runner_hash(source: str) -> str:
-    header = json.loads(source.splitlines()[0].lstrip("#").strip())
-    return header["Depends"]
+    """The runner JSON inside the leading comment block (a version tag line
+    may precede it, as GenVM allows)."""
+    block = []
+    for line in source.splitlines():
+        if not line.startswith("#"):
+            break
+        block.append(line.lstrip("#").strip())
+    text = " ".join(block)
+    return json.loads(text[text.index("{"):])["Depends"]
 
 
 def parse_args() -> argparse.Namespace:

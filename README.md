@@ -23,18 +23,19 @@ GovSentry is deployed to **GenLayer Studio Next** (chain `61997`):
 
 | | |
 | --- | --- |
-| Contract | [`0xc5129C89Ce847bd361B463092bAd40E380867bd8`](https://explorer-studio-next.genlayer.com/address/0xc5129C89Ce847bd361B463092bAd40E380867bd8) (v0.3.0) |
-| Deploy tx | [`0x5507b9d7…be510b`](https://explorer-studio-next.genlayer.com/tx/0x5507b9d7750e7e852093f27218f9c5453a3cb49630d65f576bdf50f27dbe510b) |
+| Contract | [`0x173a18540D6bCC8c59589F182AE10F71781c9E93`](https://explorer-studio-next.genlayer.com/address/0x173a18540D6bCC8c59589F182AE10F71781c9E93) (v0.3.0) |
+| Deploy tx | [`0x533b74ee…d11dc6`](https://explorer-studio-next.genlayer.com/tx/0x533b74ee3eed038f34345b06a336c344ec11cb29571d334add1f68492ad11dc6) |
 | RPC | `https://studio-next.genlayer.com/api` |
 | Chain 1 RPC (curated) | `https://rpc.mevblocker.io` |
 | Bootstrap DAO | #1 Compound Governance Timelock (`0x6d903f60…dC33925`), governor `0x309a862b…04c8c0`, **VERIFIED** (timelock `admin()` read through web consensus), 8 preimage-checked selectors, 10 GEN test bounty escrow |
-| Demo incident | Compound proposal 609, action 0, read from mainnet: [`SUSPICIOUS_OMISSION`](https://explorer-studio-next.genlayer.com/tx/0x8b986d8eee02462603282e945c0cf263e396b566da0d08517d8f420a72276c52) |
+| Demo incident | Compound proposal 609 (Active), action 0, read from mainnet: [`SUSPICIOUS_OMISSION`](https://explorer-studio-next.genlayer.com/tx/0x4f25c2de3019058527fbb0b81b0ae5e4c490d703f46f3e14bc900fbb584846ff) |
 
 Every deployment and bootstrap transaction reached `finalized` with
 `MAJORITY_AGREE`. Hashes and explorer links are recorded in
-[`deployments/studio.json`](deployments/studio.json). The earlier v0.2
-deployment (`0x23e4Ccd4…8257B5`) accepted reporter-supplied calldata and should
-no longer be used.
+[`deployments/studio.json`](deployments/studio.json). Earlier deployments
+(`0x23e4Ccd4…8257B5`, which accepted reporter-supplied calldata, and
+`0xc5129C89…867bd8`, which lacked the lifecycle check and per-funder escrow)
+should no longer be used.
 
 ## How it works
 
@@ -66,8 +67,16 @@ no longer be used.
    closes, and reverts with `ERR_CHALLENGE_WINDOW_ACTIVE` if called early.
 7. `expire_incident(incident_id)` settles dismissed, inconclusive, and stalled
    incidents fairly. Refunds are collected with `withdraw()`.
-8. A sponsor withdraws escrow only after `request_escrow_closure(dao_id)` has
-   run for **14 days** and none of the DAO's incidents is unresolved.
+8. Anyone can fund a DAO's escrow with `fund_bounty_escrow(dao_id)` and owns
+   only their own position (pool shares, so paid bounties are borne pro rata).
+   A funder withdraws their whole position with
+   `withdraw_bounty_escrow(dao_id)` only after their own
+   `request_escrow_closure(dao_id)` has run for **14 days** and none of the
+   DAO's incidents is unresolved. The registrant has no claim on other funders'
+   money.
+9. The bounty reserved across all actions of one proposal is capped at
+   `MAX_PROPOSAL_BOUNTY` (**5 GEN**), so splitting a hijack over several actions
+   does not multiply the payout.
 
 ### Web consensus verification pipeline
 
@@ -79,6 +88,8 @@ report_proposal(dao_id, proposal_id, action_index, created_block)
        eth_call   governor.getActions(id)        GovernorBravo
        eth_call   governor.proposalDetails(id)   OpenZeppelin GovernorStorage
        eth_getLogs ProposalCreated in created_block, from the governor only
+       eth_call   governor.state(id)             must be Pending, Active,
+                                                 Succeeded or Queued
   -> stored actions are authoritative; the event must match them exactly,
      and (OpenZeppelin) keccak256(description) must equal descriptionHash
   -> Bravo actions are reassembled as keccak(signature)[:4] + args,
@@ -100,6 +111,9 @@ exactly between leader and validators, two transient RPC failures
 | High: single-action DoS | Deduplication on `dao_id:proposal_id:action_index` | `test_multi_action_reports_are_independent` |
 | High: third-party registration | Timelock `admin()` resolved on-chain; `VERIFIED` vs `UNVERIFIED_REGISTRAR`; unverified DAOs cannot be reported against or squat a timelock | `test_timelock_admin_resolution_flags_unverified_dao` |
 | High: escrow rug | 14-day `request_escrow_closure` notice; withdrawal blocked while incidents are unresolved | `test_instant_escrow_withdrawal_reverts_without_closure_notice` |
+| Historical / executed proposal exploitation | Governor `state()` read in the same batch; only Pending (0), Active (1), Succeeded (4) and Queued (5) are reportable, anything else or a reverting `state()` fails closed with `ERR_PROPOSAL_NOT_ACTIONABLE` | `test_executed_proposal_rejected_by_state_check` |
+| Escrow hijacking | Per-funder escrow positions (`escrow_ledger`, pool shares per `dao_id:epoch:funder`) and per-funder closure notices | `test_funder_escrow_isolation` |
+| Bounty multiplication on multi-action proposals | `awarded_bounty_per_proposal` caps reserved plus paid bounty per proposal at 5 GEN; overturned reservations free the cap | `test_multi_action_bounty_cap` |
 
 All of them live in [`tests/direct/test_review_poc.py`](tests/direct/test_review_poc.py).
 
@@ -124,9 +138,14 @@ All of them live in [`tests/direct/test_review_poc.py`](tests/direct/test_review
 - **Verification means "admin is the governor", not "the registrant is the
   DAO".** A third party can still sponsor a correctly paired DAO; it only
   risks its own escrow, and cannot pair a real timelock with a fake governor.
-- **Escrow pinning.** Any open incident blocks escrow withdrawal. A reporter
-  could delay a closure by filing flags, at the cost of a 10% dismissal fee per
-  dismissed flag.
+- **Escrow pinning.** Any open incident blocks every funder's withdrawal. A
+  reporter could delay closures by filing flags, at the cost of a 10%
+  dismissal fee per dismissed flag. Funders who join while incidents are open
+  share in their outcome, because shares are priced on reserved plus
+  unreserved escrow.
+- **Lifecycle is checked at report time.** A proposal canceled after it was
+  reported still pays out if its verdict survives the challenge window; that is
+  intended, since the alarm may be why it was canceled.
 - **Verdicts are advisory.** Protection depends on a Guardian or pause module
   actually consuming the verdict before the timelock ETA.
 

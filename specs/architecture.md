@@ -67,6 +67,17 @@ for the DAO's chain (`set_chain_rpc`):
 | 0 | `eth_call governor.getActions(id)` | GovernorBravo stored actions (empty arrays for unknown ids) |
 | 1 | `eth_call governor.proposalDetails(id)` | OpenZeppelin `GovernorStorage` actions + `descriptionHash` (reverts for unknown ids) |
 | 2 | `eth_getLogs` for `ProposalCreated` in `created_block`, from the governor only | the proposal description |
+| 3 | `eth_call governor.state(id)` | lifecycle gate |
+
+**Lifecycle gate.** Only proposals that can still execute are reportable:
+`state()` must be Pending (0), Active (1), Succeeded (4) or Queued (5).
+Canceled (2), Defeated (3), Expired (6), Executed (7), or a reverting
+`state()` fail closed with `[EXTERNAL] ERR_PROPOSAL_NOT_ACTIONABLE proposal is
+<State>`. This stops reporters from mining old, already executed proposals for
+bounties. The state is checked inside the leader function but not returned, so
+a validator reading a block later still agrees as long as the proposal stays
+actionable; a transition across the boundary makes them disagree, and the
+leader rotates.
 
 The stored actions are authoritative, because they are what the governor will
 queue. The event must carry identical targets, values, signatures and
@@ -162,20 +173,37 @@ that contradict the ground truth.
 | `BOUNTY_SUSPICIOUS`        | 1.0 GEN (capped by DAO escrow) |
 | `DISMISSAL_FEE_BPS`        | 10% of reporter bond |
 | `LOSER_BOND_TO_WINNER_BPS` | 50% of the losing bond |
-| `ESCROW_CLOSURE_NOTICE`    | 14 days      |
+| `ESCROW_CLOSURE_NOTICE`    | 14 days per funder |
+| `MAX_PROPOSAL_BOUNTY`      | 5.0 GEN across all actions of a proposal |
 
 **Bounty funding.** DAO sponsors fund a per-DAO bounty escrow, either with value
 attached to `register_dao` or later through `fund_bounty_escrow`. When a flag is
 classified as deceptive, its bounty is *reserved* from the escrow at once, so
 the same escrow can never be promised to two incidents. If an appeal overturns
 the flag, or the incident ends inconclusive, the reservation goes back to the
-escrow. A registrant can withdraw only the unreserved part of the escrow, and
-only after `request_escrow_closure(dao_id)` has run for
-`ESCROW_CLOSURE_NOTICE` (14 days) while the DAO has no unresolved incident
-(`open_incidents == 0`; `ERR_CLOSURE_NOTICE` / `ERR_UNRESOLVED_INCIDENTS`
-otherwise). Reporters can keep reporting during the notice, and every incident
-they open pins the escrow until it reaches `PAID`, `OVERTURNED` or `EXPIRED`.
-`cancel_escrow_closure` resets the notice.
+escrow.
+
+**Per-funder escrow.** Anyone can fund a DAO's escrow, and every funder owns
+only their own position. Positions are pool shares kept in `escrow_ledger`
+under `dao_id:epoch:funder`; a position is worth
+`shares * (bounty_escrow + escrow_reserved) / escrow_shares`. New money mints
+shares at that price, and a paid bounty lowers the price, so losses are shared
+pro rata in O(1) without iterating funders. If bounties drain the pool to zero,
+the next deposit starts a new epoch instead of being diluted by worthless
+shares. A funder withdraws their whole position with
+`withdraw_bounty_escrow(dao_id)`, only after their own
+`request_escrow_closure(dao_id)` has run for `ESCROW_CLOSURE_NOTICE` (14 days)
+and while the DAO has no unresolved incident (`open_incidents == 0`, so nothing
+is reserved; `ERR_CLOSURE_NOTICE` / `ERR_UNRESOLVED_INCIDENTS` otherwise).
+Callers without a position get `ERR_NOTHING_TO_CLAIM`. The registrant has no
+claim on anyone else's money. `get_escrow_position(dao_id, funder)` reports
+shares, value and the closure timer; `cancel_escrow_closure` resets it.
+
+**Per-proposal bounty cap.** `awarded_bounty_per_proposal[dao_id:proposal_id]`
+tracks bounty reserved or paid across all actions of one proposal and is capped
+at `MAX_PROPOSAL_BOUNTY` (5 GEN). A suspicious action (1 GEN) and a critical
+one on the same proposal reserve 1 + 4 GEN; two critical actions reserve 5 + 0.
+Overturned or expired reservations free the cap.
 
 **Deduplication.** One live incident per `dao_id:proposal_id:action_index`.
 Each action of a multi-action proposal is reported and judged on its own, so
@@ -249,7 +277,7 @@ deterministic across validators:
 
 Answers derived from the DAO's chain carry `[EXTERNAL]`
 (`ERR_PROPOSAL_NOT_FOUND`, `ERR_INVALID_ACTION_INDEX`, `ERR_PROPOSAL_MISMATCH`,
-`ERR_RPC`); RPC availability failures carry `[TRANSIENT]`
+`ERR_PROPOSAL_NOT_ACTIONABLE`, `ERR_RPC`); RPC availability failures carry `[TRANSIENT]`
 (`ERR_RPC_UNAVAILABLE`). LLM misbehavior raises `[LLM_ERROR]`.
 
 ## 7. Read API
@@ -262,10 +290,10 @@ The dashboard renders from views alone, without an indexer:
   description, the deterministic disassembly under `decoded`, and its appeal
   (or `None`).
 - `get_incident`, `get_appeal`, `get_dao`, `get_ledger`, `get_constants`,
-  `get_claimable`, `get_chain_rpc` and `disassemble(dao_id, calldata)` return
-  single records. DAO records include `governor`, `chain_id`, `verification`,
-  `timelock_admin`, `closure_requested_at`, `closure_unlocks_at` and
-  `open_incidents`; incidents include `action_index`, `created_block`,
+  `get_claimable`, `get_chain_rpc`, `get_escrow_position`,
+  `get_proposal_bounty` and `disassemble(dao_id, calldata)` return single
+  records. DAO records include `governor`, `chain_id`, `verification`,
+  `timelock_admin`, `open_incidents`, `escrow_reserved` and `escrow_shares`; incidents include `action_index`, `created_block`,
   `native_value`, `declared_signature` and `prose_truncated`.
 
 The flag form's dry run calls `report_proposal` as a leader-only simulation.
@@ -296,9 +324,17 @@ posted or stored.
 - **Verification scope.** `VERIFIED` proves the timelock answers to the
   declared governor, not that the registrant speaks for the DAO. A third party
   can sponsor a correctly paired DAO at the cost of its own escrow.
-- **Escrow pinning.** Open incidents block escrow withdrawal, so a reporter can
-  delay a closure by filing flags, paying a 10% dismissal fee for each one
-  that is dismissed.
+- **Escrow pinning.** Open incidents block every funder's withdrawal, so a
+  reporter can delay closures by filing flags, paying a 10% dismissal fee for
+  each one that is dismissed.
+- **Lifecycle at report time only.** A proposal canceled after being reported
+  still pays if its verdict survives; the alarm may be the reason it was
+  canceled.
+- **Runner header layout.** GenVM reads the leading comment block as runner
+  JSON. Probed on Studio Next: `# v0.3.0` directly above the `Depends` line
+  deploys; text after the JSON, or a blank line between the two, fails with
+  `invalid_contract runner malformed`. Direct-mode tests do not parse the
+  header, so `test_runner_header_is_a_standalone_json_block` guards it.
 - **Verdicts are advisory.** Protection depends on a Guardian or pause module
   acting on the verdict before the timelock ETA.
 - Nested dynamic ABI arguments (`bytes`, arrays) appear as raw words and are

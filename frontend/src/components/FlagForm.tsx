@@ -69,7 +69,8 @@ export function FlagForm({
 
   const args = () => [dao!.dao_id, Number(proposalId.trim()), Number(actionIndex.trim()), Number(createdBlock.trim())];
 
-  const bountyCap = BigInt(constants?.BOUNTY_CRITICAL ?? "5000000000000000000");
+  // Per-proposal cap: every action of one proposal shares this bounty.
+  const bountyCap = BigInt(constants?.MAX_PROPOSAL_BOUNTY ?? constants?.BOUNTY_CRITICAL ?? "5000000000000000000");
   const escrow = BigInt(dao?.bounty_escrow ?? "0");
   const maxBounty = escrow < bountyCap ? escrow : bountyCap;
   const feeBps = constants?.DISMISSAL_FEE_BPS ?? 1000;
@@ -219,7 +220,8 @@ export function FlagForm({
             {bondIssue ? <p className="mt-2 text-[12px] text-critical">{bondIssue}</p> : null}
             <p className="mt-2 text-[12px] text-muted">
               Minimum bond {gen(minBond)} GEN. The bounty is paid from the DAO's escrow ({gen(escrow, 2)} GEN available), up to{" "}
-              {gen(bountyCap)} GEN for a critical payload.
+              {gen(bountyCap)} GEN per proposal across all of its actions. Only proposals that can still execute
+              (pending, active, succeeded or queued) are accepted.
             </p>
 
             <div className="mt-4 flex flex-wrap gap-2">

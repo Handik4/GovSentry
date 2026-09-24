@@ -8,6 +8,12 @@ asserts the fix holds:
   3. High     - single-action DoS through dao_id:proposal_id deduplication
   4. High     - third-party DAO registration / timelock squatting
   5. High     - instant bounty escrow rug
+
+and the follow-up review:
+
+  6. Historical / executed proposal exploitation (state() lifecycle check)
+  7. Escrow hijacking by the registrant (per-funder escrow positions)
+  8. Bounty multiplication across the actions of one proposal
 """
 
 import json
@@ -22,6 +28,7 @@ from conftest import (
     CALLDATA_SET_FEE,
     CHALLENGE_WINDOW,
     CREATED_BLOCK,
+    EXECUTED,
     ESCROW,
     ESCROW_CLOSURE_NOTICE,
     GOVERNOR,
@@ -35,6 +42,7 @@ from conftest import (
     assert_solvent,
     deploy,
     flag,
+    hex_of,
     mock_proposal,
     mock_timelock_admin,
     mock_verdict,
@@ -413,7 +421,7 @@ def test_instant_escrow_withdrawal_reverts_without_closure_notice(env, direct_vm
     contract, _, dao_id = env
     direct_vm.sender = direct_alice
     with direct_vm.expect_revert("ERR_CLOSURE_NOTICE"):
-        contract.withdraw_bounty_escrow(dao_id, ESCROW)
+        contract.withdraw_bounty_escrow(dao_id)
     assert int(contract.get_dao(dao_id)["bounty_escrow"]) == ESCROW
 
 
@@ -421,13 +429,15 @@ def test_withdrawal_waits_for_the_full_notice(env, direct_vm, direct_alice):
     contract, t0, dao_id = env
     direct_vm.sender = direct_alice
     assert contract.request_escrow_closure(dao_id) == t0 + ESCROW_CLOSURE_NOTICE
-    assert contract.get_dao(dao_id)["closure_unlocks_at"] == t0 + ESCROW_CLOSURE_NOTICE
+    position = contract.get_escrow_position(dao_id, hex_of(direct_alice))
+    assert position["closure_unlocks_at"] == t0 + ESCROW_CLOSURE_NOTICE
+    assert int(position["value"]) == ESCROW
 
     warp_to(direct_vm, t0 + ESCROW_CLOSURE_NOTICE - 1)
     with direct_vm.expect_revert("ERR_CLOSURE_NOTICE"):
-        contract.withdraw_bounty_escrow(dao_id, ESCROW)
+        contract.withdraw_bounty_escrow(dao_id)
     warp_to(direct_vm, t0 + ESCROW_CLOSURE_NOTICE)
-    assert int(contract.withdraw_bounty_escrow(dao_id, ESCROW)) == ESCROW
+    assert int(contract.withdraw_bounty_escrow(dao_id)) == ESCROW
     assert_solvent(contract)
 
 
@@ -443,20 +453,20 @@ def test_unresolved_incident_blocks_withdrawal_after_notice(env, direct_vm, dire
     warp_to(direct_vm, t0 + ESCROW_CLOSURE_NOTICE)
     direct_vm.sender = direct_alice
     with direct_vm.expect_revert("ERR_UNRESOLVED_INCIDENTS"):
-        contract.withdraw_bounty_escrow(dao_id, 1)
+        contract.withdraw_bounty_escrow(dao_id)
 
     contract.claim_payout(incident_id)
     assert contract.get_dao(dao_id)["open_incidents"] == 0
     direct_vm.sender = direct_alice
     free = ESCROW - BOUNTY_CRITICAL
-    assert int(contract.withdraw_bounty_escrow(dao_id, free)) == free
+    assert int(contract.withdraw_bounty_escrow(dao_id)) == free
     assert_solvent(contract)
 
 
-def test_closure_is_registrant_only_and_cancellable(env, direct_vm, direct_alice, direct_bob):
+def test_closure_needs_a_position_and_is_cancellable(env, direct_vm, direct_alice, direct_bob):
     contract, t0, dao_id = env
-    direct_vm.sender = direct_bob
-    with direct_vm.expect_revert("ERR_UNAUTHORIZED"):
+    direct_vm.sender = direct_bob  # has not funded anything
+    with direct_vm.expect_revert("ERR_NOTHING_TO_CLAIM"):
         contract.request_escrow_closure(dao_id)
 
     direct_vm.sender = direct_alice
@@ -464,11 +474,11 @@ def test_closure_is_registrant_only_and_cancellable(env, direct_vm, direct_alice
     with direct_vm.expect_revert("ERR_INVALID_STATE"):
         contract.request_escrow_closure(dao_id)
     contract.cancel_escrow_closure(dao_id)
-    assert contract.get_dao(dao_id)["closure_requested_at"] == 0
+    assert contract.get_escrow_position(dao_id, hex_of(direct_alice))["closure_unlocks_at"] == 0
 
     warp_to(direct_vm, t0 + ESCROW_CLOSURE_NOTICE + CHALLENGE_WINDOW)
     with direct_vm.expect_revert("ERR_CLOSURE_NOTICE"):
-        contract.withdraw_bounty_escrow(dao_id, ESCROW)
+        contract.withdraw_bounty_escrow(dao_id)
 
 
 def test_every_terminal_state_releases_the_escrow_pin(env, direct_vm, direct_bob):
@@ -482,20 +492,228 @@ def test_every_terminal_state_releases_the_escrow_pin(env, direct_vm, direct_bob
 
 
 # ===================================================================
+# 6. Proposal lifecycle: only actionable proposals can be reported
+# ===================================================================
+
+
+def test_executed_proposal_rejected_by_state_check(env, direct_vm, direct_bob):
+    """PoC: report an ancient, already executed proposal whose description
+    under-sells its calldata, to drain the escrow at no risk to anyone."""
+    contract, _, dao_id = env
+    before = _ledger_snapshot(contract)
+    mock_verdict(direct_vm, "CRITICAL_MALICIOUS_PAYLOAD")
+    mock_proposal(direct_vm, 7, [action(CALLDATA_OWNERSHIP)], PROSE_DECEPTIVE, state=EXECUTED)
+    with direct_vm.expect_revert("ERR_PROPOSAL_NOT_ACTIONABLE"):
+        report(contract, direct_vm, direct_bob, dao_id, proposal_id=7)
+    direct_vm.value = 0
+    assert contract.get_counts()["incident_count"] == 0
+    assert _ledger_snapshot(contract) == before
+
+
+@pytest.mark.parametrize("state,name", [(2, "Canceled"), (3, "Defeated"), (6, "Expired"), (7, "Executed")])
+def test_dead_proposal_states_fail_closed(env, direct_vm, direct_bob, state, name):
+    contract, _, dao_id = env
+    mock_proposal(direct_vm, 7, [action(CALLDATA_OWNERSHIP)], PROSE_DECEPTIVE, state=state)
+    with direct_vm.expect_revert(f"ERR_PROPOSAL_NOT_ACTIONABLE proposal is {name}"):
+        report(contract, direct_vm, direct_bob, dao_id, proposal_id=7)
+    direct_vm.value = 0
+
+
+@pytest.mark.parametrize("state", [0, 1, 4, 5])  # Pending, Active, Succeeded, Queued
+def test_live_proposal_states_are_reportable(env, direct_vm, direct_bob, state):
+    contract, _, dao_id = env
+    mock_verdict(direct_vm, "CRITICAL_MALICIOUS_PAYLOAD")
+    mock_proposal(direct_vm, 7, [action(CALLDATA_OWNERSHIP)], PROSE_DECEPTIVE, state=state)
+    incident_id = report(contract, direct_vm, direct_bob, dao_id, proposal_id=7)
+    assert contract.get_incident(incident_id)["status"] == "PENDING_CHALLENGE"
+
+
+def test_unreadable_state_fails_closed(env, direct_vm, direct_bob):
+    contract, _, dao_id = env
+    mock_proposal(direct_vm, 7, [action(CALLDATA_OWNERSHIP)], PROSE_DECEPTIVE, state=None)
+    with direct_vm.expect_revert("ERR_PROPOSAL_NOT_ACTIONABLE"):
+        report(contract, direct_vm, direct_bob, dao_id, proposal_id=7)
+    direct_vm.value = 0
+
+
+# ===================================================================
+# 7. Escrow hijacking: every funder owns only their own position
+# ===================================================================
+
+
+def _fund(contract, direct_vm, funder, dao_id, amount):
+    direct_vm.sender = funder
+    direct_vm.value = amount
+    contract.fund_bounty_escrow(dao_id)
+    direct_vm.value = 0
+
+
+def _close_and_wait(contract, direct_vm, funder, dao_id):
+    direct_vm.sender = funder
+    unlocks = contract.request_escrow_closure(dao_id)
+    warp_to(direct_vm, unlocks)
+
+
+def test_funder_escrow_isolation(direct_vm, direct_deploy, direct_alice, direct_charlie):
+    """PoC: a third party (Alice) funds a DAO's escrow; the registrant
+    (Charlie) used to be able to withdraw all of it."""
+    contract = deploy(direct_deploy)
+    start_clock(direct_vm)
+    dao_id = register(contract, direct_vm, direct_charlie, escrow=0)
+    _fund(contract, direct_vm, direct_alice, dao_id, 10 * ATTO)
+
+    direct_vm.sender = direct_charlie
+    with direct_vm.expect_revert("ERR_NOTHING_TO_CLAIM"):
+        contract.request_escrow_closure(dao_id)
+    with direct_vm.expect_revert("ERR_NOTHING_TO_CLAIM"):
+        contract.withdraw_bounty_escrow(dao_id)
+    assert int(contract.get_dao(dao_id)["bounty_escrow"]) == 10 * ATTO
+
+    _close_and_wait(contract, direct_vm, direct_alice, dao_id)
+    direct_vm.sender = direct_alice
+    assert int(contract.withdraw_bounty_escrow(dao_id)) == 10 * ATTO
+    assert int(contract.get_dao(dao_id)["bounty_escrow"]) == 0
+    assert_solvent(contract)
+
+
+def test_registrant_withdraws_only_its_own_contribution(direct_vm, direct_deploy, direct_alice, direct_charlie):
+    contract = deploy(direct_deploy)
+    start_clock(direct_vm)
+    dao_id = register(contract, direct_vm, direct_charlie, escrow=2 * ATTO)
+    _fund(contract, direct_vm, direct_alice, dao_id, 10 * ATTO)
+
+    _close_and_wait(contract, direct_vm, direct_charlie, dao_id)
+    direct_vm.sender = direct_charlie
+    assert int(contract.withdraw_bounty_escrow(dao_id)) == 2 * ATTO
+    with direct_vm.expect_revert("ERR_NOTHING_TO_CLAIM"):
+        contract.withdraw_bounty_escrow(dao_id)
+    assert int(contract.get_escrow_position(dao_id, hex_of(direct_alice))["value"]) == 10 * ATTO
+
+
+def test_another_funders_notice_does_not_unlock_mine(env, direct_vm, direct_alice, direct_bob):
+    contract, t0, dao_id = env
+    _fund(contract, direct_vm, direct_bob, dao_id, 4 * ATTO)
+    _close_and_wait(contract, direct_vm, direct_alice, dao_id)
+    direct_vm.sender = direct_bob
+    with direct_vm.expect_revert("ERR_CLOSURE_NOTICE"):
+        contract.withdraw_bounty_escrow(dao_id)
+
+
+def test_paid_bounties_are_borne_pro_rata(env, direct_vm, direct_alice, direct_bob, direct_charlie):
+    contract, t0, dao_id = env  # Alice funded ESCROW (10 GEN) at registration
+    _fund(contract, direct_vm, direct_charlie, dao_id, 10 * ATTO)
+    mock_verdict(direct_vm, "CRITICAL_MALICIOUS_PAYLOAD")
+    incident_id = flag(contract, direct_vm, direct_bob, dao_id)
+    warp_to(direct_vm, t0 + CHALLENGE_WINDOW)
+    contract.claim_payout(incident_id)
+
+    for funder in (direct_alice, direct_charlie):
+        assert int(contract.get_escrow_position(dao_id, hex_of(funder))["value"]) == 10 * ATTO - BOUNTY_CRITICAL // 2
+    for funder in (direct_alice, direct_charlie):
+        _close_and_wait(contract, direct_vm, funder, dao_id)
+        direct_vm.sender = funder
+        assert int(contract.withdraw_bounty_escrow(dao_id)) == 10 * ATTO - BOUNTY_CRITICAL // 2
+    assert int(contract.get_dao(dao_id)["bounty_escrow"]) == 0
+    assert_solvent(contract)
+
+
+def test_drained_pool_does_not_dilute_the_next_funder(direct_vm, direct_deploy, direct_alice, direct_bob,
+                                                      direct_charlie):
+    contract = deploy(direct_deploy)
+    t0 = start_clock(direct_vm)
+    dao_id = register(contract, direct_vm, direct_alice, escrow=BOUNTY_CRITICAL)
+    mock_verdict(direct_vm, "CRITICAL_MALICIOUS_PAYLOAD")
+    incident_id = flag(contract, direct_vm, direct_bob, dao_id)
+    warp_to(direct_vm, t0 + CHALLENGE_WINDOW)
+    contract.claim_payout(incident_id)  # the pool is now empty
+
+    _fund(contract, direct_vm, direct_charlie, dao_id, 3 * ATTO)
+    assert int(contract.get_escrow_position(dao_id, hex_of(direct_charlie))["value"]) == 3 * ATTO
+    assert int(contract.get_escrow_position(dao_id, hex_of(direct_alice))["value"]) == 0
+    direct_vm.sender = direct_alice
+    with direct_vm.expect_revert("ERR_NOTHING_TO_CLAIM"):
+        contract.request_escrow_closure(dao_id)
+    assert_solvent(contract)
+
+
+# ===================================================================
+# 8. Bounty multiplication across the actions of one proposal
+# ===================================================================
+
+
+def test_multi_action_bounty_cap(env, direct_vm, direct_bob, direct_charlie):
+    """PoC: a proposal with two hijack actions used to reserve 2 x 5 GEN."""
+    contract, _, dao_id = env
+    mock_verdict(direct_vm, "CRITICAL_MALICIOUS_PAYLOAD")
+    mock_proposal(direct_vm, 21, [action(CALLDATA_OWNERSHIP), action(CALLDATA_MINT)], PROSE_DECEPTIVE)
+    first = report(contract, direct_vm, direct_bob, dao_id, proposal_id=21, action_index=0)
+    second = report(contract, direct_vm, direct_charlie, dao_id, proposal_id=21, action_index=1)
+
+    reserved = [int(contract.get_incident(i)["reserved_bounty"]) for i in (first, second)]
+    assert reserved == [BOUNTY_CRITICAL, 0]
+    assert sum(reserved) == 5 * ATTO
+    assert int(contract.get_proposal_bounty(dao_id, 21)) == 5 * ATTO
+    assert int(contract.get_dao(dao_id)["bounty_escrow"]) == ESCROW - 5 * ATTO
+    assert_solvent(contract)
+
+
+def test_bounty_cap_tops_up_across_severities(env, direct_vm, direct_bob):
+    contract, _, dao_id = env
+    direct_vm.mock_llm(r'"selector": "0x69fe0e2d"', _llm_payload({"classification": "SUSPICIOUS_OMISSION"}))
+    direct_vm.mock_llm(r'"selector": "0xf2fde38b"', _llm_payload({"classification": "CRITICAL_MALICIOUS_PAYLOAD"}))
+    mock_proposal(direct_vm, 22, [action(CALLDATA_SET_FEE), action(CALLDATA_OWNERSHIP)], PROSE_DECEPTIVE)
+    a = report(contract, direct_vm, direct_bob, dao_id, proposal_id=22, action_index=0)
+    b = report(contract, direct_vm, direct_bob, dao_id, proposal_id=22, action_index=1)
+    assert int(contract.get_incident(a)["reserved_bounty"]) == 1 * ATTO
+    assert int(contract.get_incident(b)["reserved_bounty"]) == 4 * ATTO
+
+
+def test_overturned_reservation_frees_the_proposal_cap(env, direct_vm, direct_bob, direct_charlie):
+    contract, _, dao_id = env
+    mock_verdict(direct_vm, "CRITICAL_MALICIOUS_PAYLOAD")
+    mock_proposal(direct_vm, 23, [action(CALLDATA_OWNERSHIP), action(CALLDATA_MINT)], PROSE_DECEPTIVE)
+    first = report(contract, direct_vm, direct_bob, dao_id, proposal_id=23, action_index=0)
+    rebuttal = f"Rebuttal for {contract.get_incident(first)['calldata_hash']}: the forum post discloses it."
+    direct_vm.sender = direct_charlie
+    direct_vm.value = 2 * ATTO
+    contract.file_appeal(first, rebuttal)
+    direct_vm.value = 0
+    direct_vm.mock_llm(r".*GovSentry appeal tribunal.*", _llm_payload({"appeal_outcome": "UPHELD"}))
+    contract.resolve_appeal(first)
+    assert int(contract.get_proposal_bounty(dao_id, 23)) == 0
+
+    second = report(contract, direct_vm, direct_charlie, dao_id, proposal_id=23, action_index=1)
+    assert int(contract.get_incident(second)["reserved_bounty"]) == BOUNTY_CRITICAL
+    assert_solvent(contract)
+
+
+def test_bounty_cap_is_per_proposal(env, direct_vm, direct_bob):
+    contract, _, dao_id = env
+    mock_verdict(direct_vm, "CRITICAL_MALICIOUS_PAYLOAD")
+    a = flag(contract, direct_vm, direct_bob, dao_id, proposal_id=31)
+    b = flag(contract, direct_vm, direct_bob, dao_id, proposal_id=32)
+    assert [int(contract.get_incident(i)["reserved_bounty"]) for i in (a, b)] == [5 * ATTO, 5 * ATTO]
+
+
+# ===================================================================
 # Deployment guard
 # ===================================================================
 
 
 def test_runner_header_is_a_standalone_json_block():
-    """GenVM parses the whole leading comment block as the runner JSON.
-    Direct mode does not, so a stray comment line there only fails on a
-    real network (`invalid_contract runner malformed`)."""
+    """GenVM parses the leading comment block as the runner JSON. Probed on
+    Studio Next: a tag line before the JSON deploys; text after the JSON, or a
+    blank line between the tag and the JSON, fails with
+    `invalid_contract runner malformed`. Direct mode does not parse it."""
     with open("contracts/gov_sentry.py", encoding="utf-8") as f:
         lines = f.read().splitlines()
+    assert lines[0] == "# v0.3.0"
     block = []
     for line in lines:
         if not line.startswith("#"):
             break
         block.append(line.lstrip("#").strip())
-    header = json.loads(" ".join(block))
+    text = " ".join(block)
+    assert "{" in text, "runner JSON must be in the leading comment block"
+    header = json.loads(text[text.index("{"):])
     assert header["Depends"].startswith("py-genlayer:")

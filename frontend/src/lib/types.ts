@@ -42,9 +42,9 @@ export interface Dao {
   chain_id: number;
   verification: "VERIFIED" | "UNVERIFIED_REGISTRAR";
   timelock_admin: string;
-  closure_requested_at: number;
-  closure_unlocks_at: number;
   open_incidents: number;
+  escrow_reserved: string;
+  escrow_shares: string;
 }
 
 export interface Appeal {
@@ -104,6 +104,7 @@ export interface Constants {
   DISMISSAL_FEE_BPS: number;
   LOSER_BOND_TO_WINNER_BPS: number;
   ESCROW_CLOSURE_NOTICE: number;
+  MAX_PROPOSAL_BOUNTY: string;
 }
 
 export interface Verdict {

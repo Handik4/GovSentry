@@ -1,8 +1,9 @@
+# v0.3.0
 # { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
-# v0.3.0
-# (The version tag sits below the runner header on purpose: GenVM parses the
-# whole leading comment block as the runner JSON, so it must stay alone.)
+# Header layout is load-bearing: GenVM reads the leading comment block as the
+# runner JSON. A tag line directly before the JSON is accepted; any text after
+# it, or a blank line between the tag and the JSON, fails to deploy.
 
 # GovSentry - autonomous malicious DAO governance proposal interceptor.
 #
@@ -86,6 +87,14 @@ ESCROW_CLOSURE_NOTICE = 14 * 86400
 MAX_CALLDATA_HEX = 8192
 MAX_PROSE_LEN = 12000
 MAX_ACTION_INDEX = 63
+# Total bounty reserved or paid across all actions of one proposal, so a
+# multi-action proposal cannot multiply the payout.
+MAX_PROPOSAL_BOUNTY = 5 * ATTO
+
+# Governor ProposalState (GovernorBravo and OpenZeppelin share the ordering).
+PROPOSAL_STATES = ("Pending", "Active", "Canceled", "Defeated", "Succeeded", "Queued", "Expired", "Executed")
+# Only proposals that can still execute are worth intercepting.
+ACTIONABLE_STATES = (0, 1, 4, 5)
 MAX_REBUTTAL_LEN = 6000
 MIN_REBUTTAL_LEN = 32
 MAX_NAME_LEN = 128
@@ -152,6 +161,7 @@ ERR_UNRESOLVED_INCIDENTS = f"{ERROR_EXPECTED} ERR_UNRESOLVED_INCIDENTS"
 ERR_PROPOSAL_NOT_FOUND = f"{ERROR_EXTERNAL} ERR_PROPOSAL_NOT_FOUND"
 ERR_INVALID_ACTION_INDEX = f"{ERROR_EXTERNAL} ERR_INVALID_ACTION_INDEX"
 ERR_PROPOSAL_MISMATCH = f"{ERROR_EXTERNAL} ERR_PROPOSAL_MISMATCH"
+ERR_PROPOSAL_NOT_ACTIONABLE = f"{ERROR_EXTERNAL} ERR_PROPOSAL_NOT_ACTIONABLE"
 ERR_RPC = f"{ERROR_EXTERNAL} ERR_RPC"
 ERR_RPC_UNAVAILABLE = f"{ERROR_TRANSIENT} ERR_RPC_UNAVAILABLE"
 
@@ -197,6 +207,7 @@ PRIVILEGED_KEYWORDS = (
 SIG_ADMIN = "admin()"
 SIG_GET_ACTIONS = "getActions(uint256)"  # GovernorBravo
 SIG_PROPOSAL_DETAILS = "proposalDetails(uint256)"  # OpenZeppelin GovernorStorage
+SIG_STATE = "state(uint256)"
 SIG_PROPOSAL_CREATED = (
     "ProposalCreated(uint256,address,address[],uint256[],string[],bytes[],uint256,uint256,string)"
 )
@@ -214,15 +225,19 @@ class Dao:
     target_timelock: str
     name: str
     description_url: str
-    bounty_escrow: u256  # unreserved sponsor funds available for bounties
+    bounty_escrow: u256  # unreserved funder money available for bounties
     selector_schema: str  # canonical JSON {"<8 hex>": "<signature>"}
     registered_at: u256
     governor: str  # GovernorBravo or OpenZeppelin GovernorStorage proposal source
     chain_id: u256  # key into the owner-curated chain_rpcs registry
     verification: str  # DAO_VERIFIED | DAO_UNVERIFIED
     timelock_admin: str  # admin() as resolved at the last verification
-    closure_requested_at: u256  # 0 when no escrow closure notice is running
     open_incidents: u256  # incidents not yet PAID, OVERTURNED or EXPIRED
+    # Escrow pool. Funders hold shares of bounty_escrow + escrow_reserved, so
+    # a paid bounty is borne pro rata by every funder in O(1).
+    escrow_reserved: u256  # bounties reserved for live incidents
+    escrow_shares: u256  # total shares outstanding in the current epoch
+    escrow_epoch: u256  # bumped when a drained pool is refunded, voiding old shares
 
 
 @allow_storage
@@ -592,24 +607,27 @@ def _read_proposal_action(
     through web consensus. The governor's stored actions are authoritative
     (GovernorBravo getActions, or OpenZeppelin GovernorStorage
     proposalDetails); the ProposalCreated event in `created_block` supplies
-    the description and must agree with them."""
+    the description and must agree with them. The proposal must still be
+    able to execute: state() in Pending, Active, Succeeded or Queued."""
 
     def leader_fn():
         id_word = _uint_word(proposal_id)
         get_actions = {"to": governor, "data": "0x" + _selector_of(SIG_GET_ACTIONS) + id_word}
         details = {"to": governor, "data": "0x" + _selector_of(SIG_PROPOSAL_DETAILS) + id_word}
+        state_call = {"to": governor, "data": "0x" + _selector_of(SIG_STATE) + id_word}
         log_filter = {
             "address": governor,
             "fromBlock": hex(created_block),
             "toBlock": hex(created_block),
             "topics": ["0x" + _keccak_hex(SIG_PROPOSAL_CREATED.encode("utf-8"))],
         }
-        actions_reply, details_reply, logs_reply = _rpc_batch(
+        actions_reply, details_reply, logs_reply, state_reply = _rpc_batch(
             rpc_url,
             [
                 ("eth_call", [get_actions, "latest"]),
                 ("eth_call", [details, "latest"]),
                 ("eth_getLogs", [log_filter]),
+                ("eth_call", [state_call, "latest"]),
             ],
         )
         if "error" in logs_reply:
@@ -634,6 +652,17 @@ def _read_proposal_action(
             raise gl.vm.UserError(f"{ERR_RPC} inconsistent action arrays")
         if action_index >= count:
             raise gl.vm.UserError(f"{ERR_INVALID_ACTION_INDEX} proposal has {count} actions")
+
+        # Fail closed: an executed, canceled, defeated or expired proposal can
+        # no longer harm the DAO, so it must not earn a bounty. The state is
+        # checked here and not returned, so a validator reading one block
+        # later still agrees while the proposal stays actionable.
+        if "error" in state_reply:
+            raise gl.vm.UserError(f"{ERR_PROPOSAL_NOT_ACTIONABLE} state() reverted")
+        state = _abi_decode(["uint256"], _hex_bytes(state_reply["result"]))[0]
+        if state not in ACTIONABLE_STATES:
+            name = PROPOSAL_STATES[state] if state < len(PROPOSAL_STATES) else str(state)
+            raise gl.vm.UserError(f"{ERR_PROPOSAL_NOT_ACTIONABLE} proposal is {name}")
 
         event = None
         logs = logs_reply["result"] if isinstance(logs_reply["result"], list) else []
@@ -709,6 +738,13 @@ class GovSentry(gl.contract.Contract):
 
     chain_rpcs: TreeMap[u256, str]  # owner-curated JSON-RPC endpoint per chain id
 
+    # Per-funder escrow, keyed "dao_id:epoch:funder". The ledger holds pool
+    # shares; a position is worth shares * (escrow + reserved) / total shares.
+    escrow_ledger: TreeMap[str, u256]
+    escrow_closure: TreeMap[str, u256]  # funder's closure notice timestamp
+    # "dao_id:proposal_id" -> bounty reserved or paid across all its actions
+    awarded_bounty_per_proposal: TreeMap[str, u256]
+
     def __init__(self):
         self.owner = gl.message.sender_address
         self.next_dao_id = 1
@@ -728,7 +764,25 @@ class GovSentry(gl.contract.Contract):
             "DISMISSAL_FEE_BPS": DISMISSAL_FEE_BPS,
             "LOSER_BOND_TO_WINNER_BPS": LOSER_BOND_TO_WINNER_BPS,
             "ESCROW_CLOSURE_NOTICE": ESCROW_CLOSURE_NOTICE,
+            "MAX_PROPOSAL_BOUNTY": str(MAX_PROPOSAL_BOUNTY),
         }
+
+    @gl.public.view
+    def get_escrow_position(self, dao_id: int, funder: str) -> dict:
+        d = self._dao(dao_id)
+        key = self._funder_key(dao_id, d, Address(funder))
+        shares = int(self.escrow_ledger.get(key, u256(0)))
+        requested = int(self.escrow_closure.get(key, u256(0)))
+        return {
+            "shares": str(shares),
+            "value": str(self._position_value(d, shares)),
+            "closure_requested_at": requested,
+            "closure_unlocks_at": requested + ESCROW_CLOSURE_NOTICE if key in self.escrow_closure else 0,
+        }
+
+    @gl.public.view
+    def get_proposal_bounty(self, dao_id: int, proposal_id: int) -> str:
+        return str(self.awarded_bounty_per_proposal.get(f"{dao_id}:{proposal_id}", u256(0)))
 
     @gl.public.view
     def get_chain_rpc(self, chain_id: int) -> str:
@@ -845,21 +899,24 @@ class GovSentry(gl.contract.Contract):
             target_timelock=timelock,
             name=name,
             description_url=description_url,
-            bounty_escrow=u256(value),
+            bounty_escrow=u256(0),
             selector_schema="{}",
             registered_at=u256(self._now()),
             governor=gov,
             chain_id=u256(chain_id),
             verification=verification,
             timelock_admin=admin,
-            closure_requested_at=u256(0),
             open_incidents=u256(0),
+            escrow_reserved=u256(0),
+            escrow_shares=u256(0),
+            escrow_epoch=u256(0),
         )
         # Only a verified registration claims the timelock, so a squatter
         # pairing a real timelock with a fake governor cannot block it.
         if verification == DAO_VERIFIED:
             self.dao_by_timelock[key] = u256(dao_id)
-        self._deposit_bonded(value)
+        if value > 0:
+            self._credit_escrow(dao_id, gl.message.sender_address, value)
         return dao_id
 
     @gl.public.write
@@ -917,49 +974,50 @@ class GovSentry(gl.contract.Contract):
 
     @gl.public.write.payable
     def fund_bounty_escrow(self, dao_id: int) -> str:
-        d = self._dao(dao_id)
+        """Anyone can fund a DAO's bounty escrow; the funder, not the
+        registrant, owns the resulting position."""
+        self._dao(dao_id)
         value = int(gl.message.value)
         if value == 0:
             raise gl.vm.UserError(f"{ERR_INSUFFICIENT_BOND} zero value")
-        d.bounty_escrow = u256(int(d.bounty_escrow) + value)
-        self.registered_daos[u256(dao_id)] = d
-        self._deposit_bonded(value)
-        return str(d.bounty_escrow)
+        self._credit_escrow(dao_id, gl.message.sender_address, value)
+        return str(self.registered_daos[u256(dao_id)].bounty_escrow)
 
     @gl.public.write
     def request_escrow_closure(self, dao_id: int) -> int:
-        """Registrant-only: start the ESCROW_CLOSURE_NOTICE countdown that
-        must elapse before any escrow can be withdrawn. Returns the unlock
-        time."""
+        """Start the caller's ESCROW_CLOSURE_NOTICE countdown. Returns the
+        time from which the caller may withdraw their own position."""
         d = self._dao(dao_id)
-        if gl.message.sender_address != d.registrant:
-            raise gl.vm.UserError(f"{ERR_UNAUTHORIZED} registrant only")
-        if int(d.closure_requested_at) != 0:
+        key = self._funder_key(dao_id, d, gl.message.sender_address)
+        if int(self.escrow_ledger.get(key, u256(0))) == 0:
+            raise gl.vm.UserError(f"{ERR_NOTHING_TO_CLAIM} no escrow position")
+        if key in self.escrow_closure:
             raise gl.vm.UserError(f"{ERR_INVALID_STATE} closure already requested")
         now = self._now()
-        d.closure_requested_at = u256(now)
-        self.registered_daos[u256(dao_id)] = d
+        self.escrow_closure[key] = u256(now)
         return now + ESCROW_CLOSURE_NOTICE
 
     @gl.public.write
     def cancel_escrow_closure(self, dao_id: int) -> None:
         d = self._dao(dao_id)
-        if gl.message.sender_address != d.registrant:
-            raise gl.vm.UserError(f"{ERR_UNAUTHORIZED} registrant only")
-        if int(d.closure_requested_at) == 0:
+        key = self._funder_key(dao_id, d, gl.message.sender_address)
+        if key not in self.escrow_closure:
             raise gl.vm.UserError(f"{ERR_INVALID_STATE} no closure requested")
-        d.closure_requested_at = u256(0)
-        self.registered_daos[u256(dao_id)] = d
+        del self.escrow_closure[key]
 
     @gl.public.write
-    def withdraw_bounty_escrow(self, dao_id: int, amount: int) -> str:
-        """Registrant-only withdrawal of UNRESERVED escrow, allowed only once
-        the closure notice has elapsed and no incident is unresolved."""
+    def withdraw_bounty_escrow(self, dao_id: int) -> str:
+        """Withdraw the caller's whole escrow position, after the caller's own
+        closure notice has elapsed and while no incident of the DAO is
+        unresolved (so no part of the pool is reserved)."""
         d = self._dao(dao_id)
-        if gl.message.sender_address != d.registrant:
-            raise gl.vm.UserError(f"{ERR_UNAUTHORIZED} registrant only")
-        requested = int(d.closure_requested_at)
-        if requested == 0:
+        who = gl.message.sender_address
+        key = self._funder_key(dao_id, d, who)
+        shares = int(self.escrow_ledger.get(key, u256(0)))
+        if shares == 0:
+            raise gl.vm.UserError(f"{ERR_NOTHING_TO_CLAIM} no escrow position")
+        requested = int(self.escrow_closure.get(key, u256(0)))
+        if key not in self.escrow_closure:
             raise gl.vm.UserError(f"{ERR_CLOSURE_NOTICE} call request_escrow_closure first")
         if self._now() < requested + ESCROW_CLOSURE_NOTICE:
             raise gl.vm.UserError(
@@ -967,14 +1025,17 @@ class GovSentry(gl.contract.Contract):
             )
         if int(d.open_incidents) != 0:
             raise gl.vm.UserError(f"{ERR_UNRESOLVED_INCIDENTS} {int(d.open_incidents)} pending")
-        if amount <= 0 or amount > int(d.bounty_escrow):
-            raise gl.vm.UserError(f"{ERR_INVALID_INPUT} invalid amount")
+
+        amount = self._position_value(d, shares)
+        del self.escrow_ledger[key]
+        del self.escrow_closure[key]
+        d.escrow_shares = u256(int(d.escrow_shares) - shares)
         d.bounty_escrow = u256(int(d.bounty_escrow) - amount)
         self.registered_daos[u256(dao_id)] = d
         self.total_bonded = u256(int(self.total_bonded) - amount)
         self.total_deposited = u256(int(self.total_deposited) - amount)
         self.total_disbursed = u256(int(self.total_disbursed) + amount)
-        self._send(d.registrant, amount)
+        self._send(who, amount)
         return str(amount)
 
     # ------------------------------------------------------------- reporting
@@ -1028,10 +1089,14 @@ class GovSentry(gl.contract.Contract):
         else:
             status = STATUS_PENDING_CHALLENGE
             target_bounty = BOUNTY_CRITICAL if classification == CRITICAL_MALICIOUS_PAYLOAD else BOUNTY_SUSPICIOUS
-            reserved = min(target_bounty, int(d.bounty_escrow))
+            proposal_key = f"{dao_id}:{proposal_id}"
+            awarded = int(self.awarded_bounty_per_proposal.get(proposal_key, u256(0)))
+            reserved = min(target_bounty, int(d.bounty_escrow), MAX_PROPOSAL_BOUNTY - awarded)
             if reserved > 0:
                 # Escrow -> incident reservation; both stay inside total_bonded.
                 d.bounty_escrow = u256(int(d.bounty_escrow) - reserved)
+                d.escrow_reserved = u256(int(d.escrow_reserved) + reserved)
+                self.awarded_bounty_per_proposal[proposal_key] = u256(awarded + reserved)
         d.open_incidents = u256(int(d.open_incidents) + 1)
         self.registered_daos[u256(dao_id)] = d
 
@@ -1162,6 +1227,11 @@ class GovSentry(gl.contract.Contract):
         amount = int(i.bond) + int(i.reserved_bounty) + int(i.appeal_award)
         i.status = STATUS_PAID
         self.flagged_proposals[u256(incident_id)] = i
+        if int(i.reserved_bounty) > 0:
+            # The funders' pool bears the paid bounty pro rata.
+            d = self.registered_daos[i.dao_id]
+            d.escrow_reserved = u256(int(d.escrow_reserved) - int(i.reserved_bounty))
+            self.registered_daos[i.dao_id] = d
         self._mark_resolved(i)
         # Checks-effects-interactions: leave the bonded bucket, then transfer.
         self.total_bonded = u256(int(self.total_bonded) - amount)
@@ -1339,11 +1409,9 @@ Respond ONLY with JSON:
             "chain_id": int(d.chain_id),
             "verification": d.verification,
             "timelock_admin": d.timelock_admin,
-            "closure_requested_at": int(d.closure_requested_at),
-            "closure_unlocks_at": (
-                int(d.closure_requested_at) + ESCROW_CLOSURE_NOTICE if int(d.closure_requested_at) else 0
-            ),
             "open_incidents": int(d.open_incidents),
+            "escrow_reserved": str(d.escrow_reserved),
+            "escrow_shares": str(d.escrow_shares),
         }
 
     def _incident_view(self, incident_id: int, i: Incident) -> dict:
@@ -1393,6 +1461,33 @@ Respond ONLY with JSON:
             raise gl.vm.UserError(f"{ERR_UNKNOWN_DAO} dao {dao_id}")
         return self.registered_daos[u256(dao_id)]
 
+    def _funder_key(self, dao_id: int, d: Dao, funder: Address) -> str:
+        return f"{dao_id}:{int(d.escrow_epoch)}:{funder.as_hex.lower()}"
+
+    def _position_value(self, d: Dao, shares: int) -> int:
+        total = int(d.escrow_shares)
+        if shares == 0 or total == 0:
+            return 0
+        return shares * (int(d.bounty_escrow) + int(d.escrow_reserved)) // total
+
+    def _credit_escrow(self, dao_id: int, funder: Address, value: int) -> None:
+        """Mint pool shares for `value` at the current share price."""
+        d = self.registered_daos[u256(dao_id)]
+        assets = int(d.bounty_escrow) + int(d.escrow_reserved)
+        total = int(d.escrow_shares)
+        if total > 0 and assets == 0:
+            # Bounties drained the pool: outstanding shares are worth nothing.
+            # Start a new epoch instead of diluting the new funder.
+            d.escrow_epoch = u256(int(d.escrow_epoch) + 1)
+            total = 0
+        minted = value if total == 0 else value * total // assets
+        key = self._funder_key(dao_id, d, funder)
+        self.escrow_ledger[key] = u256(int(self.escrow_ledger.get(key, u256(0))) + minted)
+        d.escrow_shares = u256(total + minted)
+        d.bounty_escrow = u256(int(d.bounty_escrow) + value)
+        self.registered_daos[u256(dao_id)] = d
+        self._deposit_bonded(value)
+
     def _rpc_for(self, chain_id: int) -> str:
         url = self.chain_rpcs.get(u256(chain_id), "") if chain_id > 0 else ""
         if url == "":
@@ -1432,6 +1527,10 @@ Respond ONLY with JSON:
             return
         i.reserved_bounty = u256(0)
         d.bounty_escrow = u256(int(d.bounty_escrow) + reserved)
+        d.escrow_reserved = u256(int(d.escrow_reserved) - reserved)
+        proposal_key = f"{int(i.dao_id)}:{int(i.proposal_id)}"
+        awarded = int(self.awarded_bounty_per_proposal.get(proposal_key, u256(0)))
+        self.awarded_bounty_per_proposal[proposal_key] = u256(awarded - reserved)
         self.registered_daos[i.dao_id] = d
 
     def _send(self, to: Address, amount: int) -> None:
