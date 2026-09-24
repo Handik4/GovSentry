@@ -1,0 +1,60 @@
+{
+  "network": "studio_next",
+  "chain_id": 61997,
+  "rpc_url": "https://studio-next.genlayer.com/api",
+  "contract_address": "0x23e4Ccd46b851E00eb28e2f9974A34Cfa78257B5",
+  "deploy_tx_hash": "0x292725cd0bc6fbb63f56dabeb952d7ab6349389da861b5991e7a92534db04096",
+  "deployer": "0x8cCbbfd8A809b4D1953aBB059749D7B67E3B972C",
+  "explorer_url": "https://explorer-studio-next.genlayer.com/address/0x23e4Ccd46b851E00eb28e2f9974A34Cfa78257B5",
+  "deploy_tx_url": "https://explorer-studio-next.genlayer.com/tx/0x292725cd0bc6fbb63f56dabeb952d7ab6349389da861b5991e7a92534db04096",
+  "source": "contracts/gov_sentry.py",
+  "source_sha256": "86422f824a26049daffc6c929f13c091f635ed93b04cb1bdca330a89e7921ca0",
+  "runner": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng",
+  "deployed_at": "2026-09-24T04:36:41Z",
+  "bootstrap": [
+    {
+      "method": "register_dao",
+      "tx_hash": "0x2c409cef7accf081a1438ddd6bdbbcf3e3d8b57465cb69ad152054368a00e40c",
+      "state": "finalized",
+      "consensus": "MAJORITY_AGREE",
+      "execution": "FINISHED_WITH_RETURN",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x2c409cef7accf081a1438ddd6bdbbcf3e3d8b57465cb69ad152054368a00e40c"
+    },
+    {
+      "method": "register_selectors",
+      "tx_hash": "0x79074587997a7cb0783f4dac56c342a1b4d40d4d9fbd47c681eaedd8ce87e874",
+      "state": "finalized",
+      "consensus": "MAJORITY_AGREE",
+      "execution": "FINISHED_WITH_RETURN",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x79074587997a7cb0783f4dac56c342a1b4d40d4d9fbd47c681eaedd8ce87e874"
+    },
+    {
+      "method": "fund_bounty_escrow",
+      "tx_hash": "0xdc197b08c1fa4b35f835a6176ae91da52dcb865c60e7700a1b954cb9b207902d",
+      "state": "finalized",
+      "consensus": "MAJORITY_AGREE",
+      "execution": "FINISHED_WITH_RETURN",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0xdc197b08c1fa4b35f835a6176ae91da52dcb865c60e7700a1b954cb9b207902d"
+    }
+  ],
+  "bootstrap_dao": {
+    "dao_id": 1,
+    "target_timelock": "0x6d903f6003cca6255D85CcA4D3B5E5146dC33925",
+    "name": "Compound Governance Timelock",
+    "description_url": "https://compound.finance/governance"
+  },
+  "deploy_status": {
+    "state": "finalized",
+    "consensus": "MAJORITY_AGREE",
+    "execution": "FINISHED_WITH_RETURN"
+  },
+  "demo_incident": {
+    "method": "flag_proposal",
+    "tx_hash": "0x22e92c37487d5fb13a4356e9e586aec03058fb308c74fa9e5cbf91f8db5c8ffa",
+    "state": "finalized",
+    "consensus": "MAJORITY_AGREE",
+    "execution": "FINISHED_WITH_RETURN",
+    "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x22e92c37487d5fb13a4356e9e586aec03058fb308c74fa9e5cbf91f8db5c8ffa",
+    "classification": "CRITICAL_MALICIOUS_PAYLOAD"
+  }
+}
