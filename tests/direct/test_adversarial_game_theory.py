@@ -13,11 +13,13 @@ from conftest import (
     CHALLENGE_WINDOW,
     CONTRACT,
     ESCROW,
+    ESCROW_CLOSURE_NOTICE,
     REPORTER_BOND,
     TARGET,
     appeal,
     assert_solvent,
     bound_rebuttal,
+    deploy,
     flag,
     hex_of,
     mock_appeal,
@@ -30,7 +32,7 @@ from conftest import (
 
 @pytest.fixture
 def env(direct_vm, direct_deploy, direct_alice):
-    contract = direct_deploy(CONTRACT)
+    contract = deploy(direct_deploy)
     t0 = start_clock(direct_vm)
     dao_id = register(contract, direct_vm, direct_alice)
     return contract, t0, dao_id
@@ -219,20 +221,19 @@ def test_zero_value_escrow_funding_rejected(env, direct_vm, direct_bob):
         "0xf2fde38b" + "0" * 8200,  # oversized
     ],
 )
-def test_malformed_calldata_rejected(env, direct_vm, direct_bob, calldata):
+def test_malformed_calldata_rejected_by_disassembler(env, calldata):
+    """Client-supplied calldata (the disassemble preview) stays strict;
+    on-chain calldata is never rejected, see test_review_poc.py."""
     contract, _, dao_id = env
-    with direct_vm.expect_revert("ERR_MALFORMED_CALLDATA"):
-        flag(contract, direct_vm, direct_bob, dao_id, calldata=calldata)
-    direct_vm.value = 0
+    with pytest.raises(Exception, match="ERR_MALFORMED_CALLDATA"):
+        contract.disassemble(dao_id, calldata)
 
 
-@pytest.mark.parametrize("target", ["", "0x1234", "0x" + "0" * 40, "0x" + "g" * 40])
-def test_invalid_target_rejected(env, direct_vm, direct_bob, target):
-    contract, _, dao_id = env
-    direct_vm.sender = direct_bob
-    direct_vm.value = REPORTER_BOND
+@pytest.mark.parametrize("governor", ["", "0x1234", "0x" + "0" * 40, "0x" + "g" * 40])
+def test_invalid_governor_rejected(env, direct_vm, direct_bob, governor):
+    contract, _, _ = env
     with direct_vm.expect_revert("ERR_INVALID_ADDRESS"):
-        contract.flag_proposal(dao_id, 1, target, CALLDATA_OWNERSHIP, "text")
+        register(contract, direct_vm, direct_bob, timelock="0x" + "66" * 20, governor=governor)
     direct_vm.value = 0
 
 
@@ -294,9 +295,17 @@ def test_non_owner_cannot_sweep_treasury(env, direct_vm, direct_bob):
 
 
 def test_escrow_withdrawal_cannot_touch_reserved_bounty(critical, direct_vm, direct_alice):
-    contract, _, dao_id, incident_id = critical
+    contract, t0, dao_id, incident_id = critical
     free = int(contract.get_dao(dao_id)["bounty_escrow"])
     assert free == ESCROW - 5 * ATTO
+    direct_vm.sender = direct_alice
+    contract.request_escrow_closure(dao_id)
+    warp_to(direct_vm, t0 + ESCROW_CLOSURE_NOTICE)
+    # The open incident still pins the escrow...
+    with direct_vm.expect_revert("ERR_UNRESOLVED_INCIDENTS"):
+        contract.withdraw_bounty_escrow(dao_id, free)
+    # ...until it settles; the reservation itself is never withdrawable.
+    contract.claim_payout(incident_id)
     direct_vm.sender = direct_alice
     with direct_vm.expect_revert("ERR_INVALID_INPUT"):
         contract.withdraw_bounty_escrow(dao_id, free + 1)
@@ -316,7 +325,7 @@ def test_withdraw_with_nothing_claimable_reverts(env, direct_vm, direct_bob):
 
 
 def test_bounty_capped_by_available_escrow(direct_vm, direct_deploy, direct_alice, direct_bob):
-    contract = direct_deploy(CONTRACT)
+    contract = deploy(direct_deploy)
     t0 = start_clock(direct_vm)
     dao_id = register(contract, direct_vm, direct_alice, escrow=2 * ATTO)
     mock_verdict(direct_vm, "CRITICAL_MALICIOUS_PAYLOAD")
@@ -340,7 +349,7 @@ def test_exact_ledger_accounting_across_full_game(
 ):
     """Drive every settlement path and check the ledger invariant plus exact
     inflow/outflow conservation after each step."""
-    contract = direct_deploy(CONTRACT)
+    contract = deploy(direct_deploy)
     t0 = start_clock(direct_vm)
     inflow = 0
 
@@ -409,6 +418,8 @@ def test_exact_ledger_accounting_across_full_game(
     direct_vm.sender = direct_owner
     contract.sweep_treasury("0x" + "44" * 20, int(ledger["total_slashed"]))
     direct_vm.sender = direct_alice
+    contract.request_escrow_closure(dao_id)
+    warp_to(direct_vm, t0 + CHALLENGE_WINDOW + ESCROW_CLOSURE_NOTICE)
     contract.withdraw_bounty_escrow(dao_id, int(contract.get_dao(dao_id)["bounty_escrow"]))
 
     final = step()

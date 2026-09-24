@@ -269,7 +269,12 @@ export function IncidentDossier({
           </p>
           <h2 id="dossier-title" className="font-display text-3xl font-bold tracking-tight sm:text-4xl">
             Proposal #{i.proposal_id}
+            <span className="text-muted"> · action {i.action_index}</span>
           </h2>
+          <p className="mt-1 text-[12px] text-muted">
+            Calldata and description read from the governor on-chain (created in block {i.created_block})
+            {i.prose_truncated ? "; the description was truncated for analysis" : ""}.
+          </p>
         </div>
         <VerdictBadge verdict={i.classification} size="md" live={isLive(i.status)} />
       </header>

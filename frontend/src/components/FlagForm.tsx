@@ -1,40 +1,17 @@
 import { useEffect, useId, useState } from "react";
-import { dryRunFlag, view } from "../lib/genlayer";
+import { dryRunReport, view } from "../lib/genlayer";
 import { explainError } from "../lib/copy";
 import { gen, parseGen } from "../lib/format";
-import type { Constants, Dao, Disassembly, Verdict } from "../lib/types";
+import type { Constants, Dao, Disassembly, DryRun } from "../lib/types";
 import type { Session } from "../hooks/useSession";
 import { Dissection } from "./Dissection";
 import { VerdictBadge } from "./Verdict";
 
-// Mirrors the contract's own checks so problems show before any call is made.
-function calldataProblem(raw: string): string | null {
-  const d = raw.trim().toLowerCase();
-  if (!d) return null;
-  if (!d.startsWith("0x")) return "Start with 0x.";
-  const body = d.slice(2);
-  if (!/^[0-9a-f]*$/.test(body)) return "Use hex characters only.";
-  if (body.length < 8) return "Include the 4-byte function selector (8 hex characters).";
-  if ((body.length - 8) % 64 !== 0) return "Arguments must be whole 32-byte words (64 hex characters each).";
-  if (body.startsWith("00000000")) return "The selector cannot be 0x00000000.";
-  if (body.length > 8192) return "Calldata is longer than 8192 hex characters.";
-  return null;
-}
+const wholeNumber = (v: string) => /^\d+$/.test(v.trim());
 
-function addressProblem(raw: string): string | null {
-  const a = raw.trim().toLowerCase();
-  if (!a) return null;
-  if (!/^0x[0-9a-f]{40}$/.test(a)) return "Use a 0x address with 40 hex characters.";
-  if (/^0x0{40}$/.test(a)) return "The zero address cannot be a target.";
-  return null;
-}
-
-const EXAMPLE = {
-  proposalId: "332",
-  target: "0x6d903f6003cca6255D85CcA4D3B5E5146dC33925",
-  calldata: "0xb71d1a0c0000000000000000000000004e6f746865722d61646d696e2d6b6579000000c0",
-  prose: "Reserve housekeeping: sweep dust balances from deprecated cToken markets into the community treasury. No admin or parameter changes.",
-};
+// A live Compound proposal: validators read its first action and its
+// description from Ethereum mainnet.
+const EXAMPLE = { proposalId: "609", actionIndex: "0", createdBlock: "26024021" };
 
 export function FlagForm({
   daos,
@@ -48,50 +25,49 @@ export function FlagForm({
   onFlagged: () => void;
 }) {
   const ids = useId();
+  const verified = daos.filter((d) => d.verification === "VERIFIED");
   const [daoId, setDaoId] = useState<number | null>(null);
   const [proposalId, setProposalId] = useState("");
-  const [target, setTarget] = useState("");
-  const [calldata, setCalldata] = useState("");
-  const [prose, setProse] = useState("");
+  const [actionIndex, setActionIndex] = useState("0");
+  const [createdBlock, setCreatedBlock] = useState("");
   const minBond = BigInt(constants?.MIN_REPORTER_BOND ?? "1000000000000000000");
   const [bondText, setBondText] = useState<string | null>(null);
   // Async results are stored with the input they describe, so edits make them
   // stale by construction instead of needing a reset.
+  const [dryFor, setDryFor] = useState<{ key: string; state: "running" | "done" | "error"; result?: DryRun; error?: string } | null>(null);
   const [decodedFor, setDecodedFor] = useState<{ key: string; value: Disassembly | null } | null>(null);
-  const [dryFor, setDryFor] = useState<{ key: string; state: "running" | "done" | "error"; verdict?: Verdict; error?: string } | null>(null);
 
-  const dao = daos.find((d) => d.dao_id === daoId) ?? daos[0];
+  const dao = verified.find((d) => d.dao_id === daoId) ?? verified[0];
   const bondInput = bondText ?? gen(minBond);
   const bond = parseGen(bondInput);
 
-  const calldataIssue = calldataProblem(calldata);
-  const targetIssue = addressProblem(target);
-  const proposalIssue = proposalId && !/^\d+$/.test(proposalId.trim()) ? "Use a whole number." : null;
+  const proposalIssue = proposalId && !wholeNumber(proposalId) ? "Use a whole number." : null;
+  const actionIssue = actionIndex && !wholeNumber(actionIndex) ? "Use a whole number." : null;
+  const blockIssue = createdBlock && (!wholeNumber(createdBlock) || Number(createdBlock) === 0) ? "Use a block number." : null;
   const bondIssue = bond === null ? "Enter an amount in GEN." : bond < minBond ? `The minimum is ${gen(minBond)} GEN.` : null;
-  const complete = !!dao && !!proposalId.trim() && !!target.trim() && !!calldata.trim() && !!prose.trim();
-  const ready = complete && !calldataIssue && !targetIssue && !proposalIssue && !bondIssue;
+  const complete = !!dao && !!proposalId.trim() && !!actionIndex.trim() && !!createdBlock.trim();
+  const ready = complete && !proposalIssue && !actionIssue && !blockIssue && !bondIssue;
 
-  const decodeKey = dao && calldata.trim() && !calldataIssue ? `${dao.dao_id}:${calldata.trim()}` : null;
+  const dryKey = `${dao?.dao_id}:${proposalId.trim()}:${actionIndex.trim()}:${createdBlock.trim()}:${bondInput}`;
+  const dry = dryFor?.key === dryKey ? dryFor : { state: "idle" as const, result: undefined, error: undefined };
+  const fetched = dry.result?.action ?? null;
+
+  // Decode the fetched calldata against the DAO's ABI (a free view call). The
+  // preview decoder is strict, so unusual on-chain calldata shows undecoded.
+  const decodeKey = dao && fetched ? `${dao.dao_id}:${fetched.calldata}` : null;
   const decoded = decodeKey && decodedFor?.key === decodeKey ? decodedFor.value : null;
-  const dryKey = `${dao?.dao_id}:${proposalId.trim()}:${target.trim()}:${calldata.trim()}:${prose.trim()}:${bondInput}`;
-  const dry = dryFor?.key === dryKey ? dryFor : { state: "idle" as const, verdict: undefined, error: undefined };
-
-  // Decode the calldata against the DAO's verified ABI as it is typed (a free view call).
   useEffect(() => {
-    if (!decodeKey || !dao) return;
+    if (!decodeKey || !dao || !fetched) return;
     let cancelled = false;
-    const t = window.setTimeout(() => {
-      view<Disassembly>("disassemble", [dao.dao_id, calldata.trim()])
-        .then((d) => !cancelled && setDecodedFor({ key: decodeKey, value: d }))
-        .catch(() => !cancelled && setDecodedFor({ key: decodeKey, value: null }));
-    }, 350);
+    view<Disassembly>("disassemble", [dao.dao_id, fetched.calldata])
+      .then((d) => !cancelled && setDecodedFor({ key: decodeKey, value: d }))
+      .catch(() => !cancelled && setDecodedFor({ key: decodeKey, value: null }));
     return () => {
       cancelled = true;
-      window.clearTimeout(t);
     };
-  }, [decodeKey, dao, calldata]);
+  }, [decodeKey, dao, fetched]);
 
-  const args = () => [dao!.dao_id, Number(proposalId.trim()), target.trim(), calldata.trim(), prose.trim()];
+  const args = () => [dao!.dao_id, Number(proposalId.trim()), Number(actionIndex.trim()), Number(createdBlock.trim())];
 
   const bountyCap = BigInt(constants?.BOUNTY_CRITICAL ?? "5000000000000000000");
   const escrow = BigInt(dao?.bounty_escrow ?? "0");
@@ -105,7 +81,8 @@ export function FlagForm({
         <div>
           <h2 id={`${ids}-title`} className="font-display text-2xl font-semibold tracking-tight">Flag a proposal</h2>
           <p className="text-sm text-muted">
-            Paste what a proposal executes and what it claims to do. Validators judge whether the description is honest.
+            Point at one action of a live proposal. Validators read its calldata and description from the DAO's
+            governor on-chain and judge whether the description is honest.
           </p>
         </div>
         <button
@@ -113,12 +90,11 @@ export function FlagForm({
           className="text-sm text-sky hover:underline"
           onClick={() => {
             setProposalId(EXAMPLE.proposalId);
-            setTarget(EXAMPLE.target);
-            setCalldata(EXAMPLE.calldata);
-            setProse(EXAMPLE.prose);
+            setActionIndex(EXAMPLE.actionIndex);
+            setCreatedBlock(EXAMPLE.createdBlock);
           }}
         >
-          Fill with an example
+          Fill with a live Compound proposal
         </button>
       </div>
 
@@ -127,30 +103,34 @@ export function FlagForm({
         onSubmit={async (e) => {
           e.preventDefault();
           if (!ready || bond === null) return;
-          const ok = await session.run(`Flag proposal #${proposalId.trim()}`, "flag_proposal", args(), bond);
+          const label = `Flag proposal #${proposalId.trim()} action ${actionIndex.trim()}`;
+          const ok = await session.run(label, "report_proposal", args(), bond);
           if (ok) {
             onFlagged();
             setProposalId("");
-            setCalldata("");
-            setProse("");
+            setActionIndex("0");
+            setCreatedBlock("");
           }
         }}
       >
-        <div className="grid gap-4 sm:grid-cols-[1fr_8rem]">
-          <div>
+        <div className="grid content-start gap-4 sm:grid-cols-2">
+          <div className="sm:col-span-2">
             <label htmlFor={`${ids}-dao`} className="text-sm font-semibold">DAO</label>
             <select
               id={`${ids}-dao`}
               className="field mt-1.5"
               value={dao?.dao_id ?? ""}
               onChange={(e) => setDaoId(Number(e.target.value))}
-              disabled={daos.length === 0}
+              disabled={verified.length === 0}
             >
-              {daos.length === 0 ? <option value="">No DAOs registered</option> : null}
-              {daos.map((d) => (
+              {verified.length === 0 ? <option value="">No verified DAOs registered</option> : null}
+              {verified.map((d) => (
                 <option key={d.dao_id} value={d.dao_id}>{d.name}</option>
               ))}
             </select>
+            <p className="mt-1 text-[12px] text-muted">
+              Only DAOs whose timelock admin is their declared governor accept reports.
+            </p>
           </div>
           <div>
             <label htmlFor={`${ids}-pid`} className="text-sm font-semibold">Proposal ID</label>
@@ -158,56 +138,61 @@ export function FlagForm({
               id={`${ids}-pid`}
               inputMode="numeric"
               className="field mt-1.5 font-mono"
-              placeholder="331"
+              placeholder="609"
               value={proposalId}
               aria-invalid={!!proposalIssue}
               onChange={(e) => setProposalId(e.target.value)}
             />
             {proposalIssue ? <p className="mt-1 text-[12px] text-critical">{proposalIssue}</p> : null}
           </div>
-          <div className="sm:col-span-2">
-            <label htmlFor={`${ids}-target`} className="text-sm font-semibold">Target contract</label>
+          <div>
+            <label htmlFor={`${ids}-action`} className="text-sm font-semibold">Action index</label>
             <input
-              id={`${ids}-target`}
-              className="field mt-1.5 font-mono text-[13px]"
-              placeholder="0x…"
-              spellCheck={false}
-              value={target}
-              aria-invalid={!!targetIssue}
-              onChange={(e) => setTarget(e.target.value)}
+              id={`${ids}-action`}
+              inputMode="numeric"
+              className="field mt-1.5 font-mono"
+              placeholder="0"
+              value={actionIndex}
+              aria-invalid={!!actionIssue}
+              onChange={(e) => setActionIndex(e.target.value)}
             />
-            {targetIssue ? <p className="mt-1 text-[12px] text-critical">{targetIssue}</p> : null}
+            {actionIssue ? <p className="mt-1 text-[12px] text-critical">{actionIssue}</p> : null}
           </div>
           <div className="sm:col-span-2">
-            <label htmlFor={`${ids}-calldata`} className="text-sm font-semibold">Raw calldata</label>
-            <textarea
-              id={`${ids}-calldata`}
-              rows={3}
-              className="field mt-1.5 font-mono text-[13px]"
-              placeholder="0xf2fde38b000000000000000000000000…"
-              spellCheck={false}
-              value={calldata}
-              aria-invalid={!!calldataIssue}
-              onChange={(e) => setCalldata(e.target.value)}
+            <label htmlFor={`${ids}-block`} className="text-sm font-semibold">Creation block</label>
+            <input
+              id={`${ids}-block`}
+              inputMode="numeric"
+              className="field mt-1.5 font-mono"
+              placeholder="26024021"
+              value={createdBlock}
+              aria-invalid={!!blockIssue}
+              onChange={(e) => setCreatedBlock(e.target.value)}
             />
-            {calldataIssue ? <p className="mt-1 text-[12px] text-critical">{calldataIssue}</p> : null}
+            {blockIssue ? <p className="mt-1 text-[12px] text-critical">{blockIssue}</p> : null}
+            <p className="mt-1 text-[12px] text-muted">
+              The block holding the proposal's ProposalCreated event, shown on the proposal's creation transaction.
+            </p>
           </div>
-          <div className="sm:col-span-2">
-            <label htmlFor={`${ids}-prose`} className="text-sm font-semibold">Proposal description</label>
-            <textarea
-              id={`${ids}-prose`}
-              rows={4}
-              className="field mt-1.5"
-              placeholder="Paste the description voters were shown."
-              value={prose}
-              maxLength={6000}
-              onChange={(e) => setProse(e.target.value)}
-            />
-          </div>
+          {fetched ? (
+            <div className="glass-card p-4 sm:col-span-2">
+              <p className="eyebrow mb-1">Read from the governor</p>
+              <p className="font-mono text-[12px] break-all text-muted">
+                action {actionIndex.trim()} of {fetched.action_count} · target {fetched.target}
+                {fetched.value !== "0" ? ` · sends ${fetched.value} wei` : ""}
+                {fetched.signature ? ` · ${fetched.signature}` : ""}
+              </p>
+            </div>
+          ) : null}
         </div>
 
         <div className="space-y-4">
-          <Dissection prose={prose} decoded={decoded} verdict={dry.verdict?.classification ?? null} compact />
+          <Dissection
+            prose={fetched?.description ?? ""}
+            decoded={decoded}
+            verdict={dry.result?.verdict.classification ?? null}
+            compact
+          />
 
           <div className="glass-card p-4 sm:p-5">
             <div className="flex flex-wrap items-end gap-4">
@@ -247,13 +232,13 @@ export function FlagForm({
                   const key = dryKey;
                   setDryFor({ key, state: "running" });
                   try {
-                    setDryFor({ key, state: "done", verdict: await dryRunFlag(args(), bond) });
+                    setDryFor({ key, state: "done", result: await dryRunReport(args(), bond) });
                   } catch (err) {
                     setDryFor({ key, state: "error", error: explainError(err instanceof Error ? err.message : String(err)) });
                   }
                 }}
               >
-                {dry.state === "running" ? "Asking the model…" : "Dry run verdict"}
+                {dry.state === "running" ? "Reading the proposal…" : "Dry run verdict"}
               </button>
               <button type="submit" className="btn btn-primary" disabled={!ready || busy || !session.signer}>
                 Flag and post {bond === null ? "" : `${gen(bond)} GEN`} bond
@@ -268,13 +253,13 @@ export function FlagForm({
             </p>
           </div>
 
-          {dry.state === "done" && dry.verdict ? (
+          {dry.state === "done" && dry.result ? (
             <div className="glass-card p-4 sm:p-5" aria-live="polite">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <p className="eyebrow">Dry run result</p>
-                <VerdictBadge verdict={dry.verdict.classification} />
+                <VerdictBadge verdict={dry.result.verdict.classification} />
               </div>
-              <p className="text-sm leading-relaxed">{dry.verdict.rationale}</p>
+              <p className="text-sm leading-relaxed">{dry.result.verdict.rationale}</p>
               <p className="mt-2 text-[12px] text-muted">
                 One simulated validator. The real verdict needs the validator set to agree.
               </p>

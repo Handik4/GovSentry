@@ -116,9 +116,16 @@ def main() -> int:
 
     receipt = client.wait_for_transaction_receipt(transaction_hash=tx_hash, wait_until=args.wait_until)
     address = contract_address(receipt)
+    execution = receipt.get("txExecutionResultName")
     print(f"contract : {address}")
+    print(f"execution: {execution}")
     if not address:
         return 2
+    if execution != "FINISHED_WITH_RETURN":
+        # The address is assigned even when the constructor or the runner
+        # header fails; nothing is deployed there, so do not record it.
+        print("error: deployment did not finish with a return", file=sys.stderr)
+        return 3
 
     if args.network != "localnet":
         DEPLOYMENTS_DIR.mkdir(exist_ok=True)

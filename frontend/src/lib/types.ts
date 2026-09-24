@@ -23,6 +23,10 @@ export interface Disassembly {
   signature: string;
   privileged: boolean;
   argument_words: ArgumentWord[];
+  native_value_wei?: string;
+  declared_signature?: string;
+  calldata_truncated?: boolean;
+  unaligned_trailing_hex?: number;
 }
 
 export interface Dao {
@@ -34,6 +38,13 @@ export interface Dao {
   bounty_escrow: string;
   selector_schema: string;
   registered_at: number;
+  governor: string;
+  chain_id: number;
+  verification: "VERIFIED" | "UNVERIFIED_REGISTRAR";
+  timelock_admin: string;
+  closure_requested_at: number;
+  closure_unlocks_at: number;
+  open_incidents: number;
 }
 
 export interface Appeal {
@@ -66,6 +77,11 @@ export interface Incident {
   flagged_at: number;
   unlock_time: number;
   appeal_award: string;
+  action_index: number;
+  created_block: number;
+  native_value: string;
+  declared_signature: string;
+  prose_truncated: boolean;
   appeal: Appeal | null;
 }
 
@@ -87,9 +103,25 @@ export interface Constants {
   BOUNTY_SUSPICIOUS: string;
   DISMISSAL_FEE_BPS: number;
   LOSER_BOND_TO_WINNER_BPS: number;
+  ESCROW_CLOSURE_NOTICE: number;
 }
 
 export interface Verdict {
   classification: Classification;
   rationale: string;
+}
+
+/** One proposal action as validators read it from the governor. */
+export interface FetchedAction {
+  target: string;
+  value: string;
+  signature: string;
+  calldata: string;
+  description: string;
+  action_count: number;
+}
+
+export interface DryRun {
+  verdict: Verdict;
+  action: FetchedAction | null;
 }

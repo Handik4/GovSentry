@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Bootstrap a deployed GovSentry: register the Compound Governance Timelock
-and attach its verified admin selectors.
+"""Bootstrap a deployed GovSentry: curate the Ethereum mainnet RPC, register
+the Compound Governance Timelock with its governor, and attach its admin
+selectors.
 
 Usage:
     python scripts/bootstrap.py                  # uses deployments/studio.json
-    python scripts/bootstrap.py --demo-incident  # only file the demo flag
+    python scripts/bootstrap.py --demo-incident  # only report the demo proposal
 
 Transaction hashes and explorer links are appended to the deployment record.
 """
@@ -22,8 +23,18 @@ RECORD = ROOT / "deployments" / "studio.json"
 # Test-network bounty escrow seeded for the bootstrap DAO (atto-GEN).
 BOOTSTRAP_ESCROW = 10 * 10**18
 
+# Ethereum mainnet endpoint validators read governors through. It must accept
+# JSON-RPC batches and serve historical eth_getLogs, without an API key, to
+# the validators' own egress. (Blast's public endpoint answered admin() but
+# returned 503 to validators for the eth_getLogs batch.)
+CHAIN_ID = 1
+CHAIN_RPC = "https://rpc.mevblocker.io"
+
 DAO = {
     "target_timelock": "0x6d903f6003cca6255D85CcA4D3B5E5146dC33925",
+    # Compound Governor (OpenZeppelin GovernorStorage); the timelock's admin().
+    "governor": "0x309a862bbc1a00e45506cb8a802d1ff10004c8c0",
+    "chain_id": CHAIN_ID,
     "name": "Compound Governance Timelock",
     "description_url": "https://compound.finance/governance",
 }
@@ -37,6 +48,8 @@ COMPOUND_SELECTORS = {
     "a76b3fda": "_supportMarket(address)",
     "27efe3cb": "_grantComp(address,uint256)",
     "e177246e": "setDelay(uint256)",
+    # Version marker the current Compound proposals call first.
+    "8889c6ab": "setVersion(((uint64,uint64,uint64),string))",
 }
 
 
@@ -63,18 +76,12 @@ def send(client, account, address, method, args, wait_until, value=0):
     return tx_hash, status
 
 
-# A deceptive proposal for the demo feed: the prose describes routine keeper
-# maintenance while the calldata hands the timelock's pending admin role to an
-# outside address.
+# A real Compound proposal for the demo feed. Validators read its first action
+# and its description from mainnet; nothing about it is supplied here.
 DEMO_INCIDENT = {
-    "proposal_id": 331,
-    "target_contract": "0x6d903f6003cca6255D85CcA4D3B5E5146dC33925",
-    "raw_calldata": "0xb71d1a0c" + "0" * 24 + "7a1ed0c4c8a5f5b3b29e6d9f1b0c2e3d4f5a6b7c",
-    "prose_description": (
-        "Keeper maintenance: rotate the heartbeat interval for the cToken "
-        "interest-accrual keeper to 30 minutes. No change to admin roles, "
-        "reserves, or market parameters."
-    ),
+    "proposal_id": 609,
+    "action_index": 0,
+    "created_block": 26024021,  # block of its ProposalCreated event
 }
 REPORTER_BOND = 10**18
 
@@ -107,14 +114,15 @@ def main() -> int:
     if args.demo_incident:
         d = DEMO_INCIDENT
         tx, status = send(
-            client, account, address, "flag_proposal",
-            [1, d["proposal_id"], d["target_contract"], d["raw_calldata"], d["prose_description"]],
+            client, account, address, "report_proposal",
+            [1, d["proposal_id"], d["action_index"], d["created_block"]],
             "finalized", value=REPORTER_BOND,
         )
         incident = client.read_contract(address=address, function_name="get_incident", args=[1])
         print(f"verdict  : {incident['classification']} ({incident['status']})")
         record["demo_incident"] = {
-            "method": "flag_proposal",
+            "method": "report_proposal",
+            **d,
             "tx_hash": tx,
             **status,
             "explorer_url": f"{explorer}/tx/{tx}" if explorer else None,
@@ -124,9 +132,15 @@ def main() -> int:
         return 0
 
     bootstrap = []
+    rpc_tx, rpc_status = send(
+        client, account, address, "set_chain_rpc", [CHAIN_ID, CHAIN_RPC], "finalized"
+    )
+    bootstrap.append({"method": "set_chain_rpc", "tx_hash": rpc_tx, **rpc_status})
+
     reg_tx, reg_status = send(
         client, account, address, "register_dao",
-        [DAO["target_timelock"], DAO["name"], DAO["description_url"]], "finalized",
+        [DAO["target_timelock"], DAO["governor"], DAO["chain_id"], DAO["name"], DAO["description_url"]],
+        "finalized",
     )
     bootstrap.append({"method": "register_dao", "tx_hash": reg_tx, **reg_status})
 

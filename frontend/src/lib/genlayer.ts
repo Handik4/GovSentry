@@ -1,6 +1,6 @@
 import { abi, chains, createAccount, createClient, generatePrivateKey } from "genlayer-js";
 import { CONFIG } from "../config";
-import type { Verdict } from "./types";
+import type { DryRun, FetchedAction, Verdict } from "./types";
 
 type Client = ReturnType<typeof createClient>;
 type Hex = `0x${string}`;
@@ -226,15 +226,17 @@ function toPlain(v: unknown): unknown {
 }
 
 /**
- * Run flag_proposal as a leader-only simulation and read the LLM verdict from
- * the non-deterministic block's output. Nothing is signed or stored.
+ * Run report_proposal as a leader-only simulation. Its non-deterministic
+ * blocks run in order: first the on-chain proposal read, then the LLM
+ * verdict. Both outputs are decoded so the form can show what validators
+ * fetched from the governor. Nothing is signed or stored.
  */
-export async function dryRunFlag(args: CallArg[], value: bigint): Promise<Verdict> {
+export async function dryRunReport(args: CallArg[], value: bigint): Promise<DryRun> {
   let result: { receipt?: Record<string, unknown> };
   try {
     result = (await readClient().simulateWriteContract({
       address: CONFIG.address,
-      functionName: "flag_proposal",
+      functionName: "report_proposal",
       args,
       value,
       includeReceipt: true,
@@ -242,12 +244,26 @@ export async function dryRunFlag(args: CallArg[], value: bigint): Promise<Verdic
   } catch (err) {
     throw new Error(revertReason(err));
   }
-  const outputs = result.receipt?.eq_outputs as Record<string, string> | undefined;
-  const first = outputs?.["0"];
-  if (!first) throw new Error("The simulation returned no verdict.");
-  const bytes = base64Bytes(first);
-  if (bytes[0] !== 0) throw new Error(decoder.decode(bytes.slice(1)));
-  const decoded = toPlain(abi.calldata.decode(bytes.slice(1))) as Partial<Verdict>;
-  if (!decoded.classification) throw new Error("The simulation returned an unreadable verdict.");
-  return { classification: decoded.classification, rationale: String(decoded.rationale ?? "") };
+  const outputs = (result.receipt?.eq_outputs ?? {}) as Record<string, string>;
+  let verdict: Verdict | null = null;
+  let action: FetchedAction | null = null;
+  for (const key of Object.keys(outputs).sort((a, b) => Number(a) - Number(b))) {
+    const bytes = base64Bytes(outputs[key]);
+    if (bytes[0] !== 0) throw new Error(decoder.decode(bytes.slice(1)));
+    const decoded = toPlain(abi.calldata.decode(bytes.slice(1))) as Record<string, unknown>;
+    if (typeof decoded.classification === "string") {
+      verdict = { classification: decoded.classification as Verdict["classification"], rationale: String(decoded.rationale ?? "") };
+    } else if (typeof decoded.calldata === "string") {
+      action = {
+        target: String(decoded.target),
+        value: String(decoded.value),
+        signature: String(decoded.signature ?? ""),
+        calldata: decoded.calldata,
+        description: String(decoded.description ?? ""),
+        action_count: Number(decoded.action_count ?? 0),
+      };
+    }
+  }
+  if (!verdict) throw new Error("The simulation returned no verdict.");
+  return { verdict, action };
 }

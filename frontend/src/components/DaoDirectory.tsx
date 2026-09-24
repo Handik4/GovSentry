@@ -67,9 +67,26 @@ export function DaoDirectory({ daos, incidents, loading }: { daos: Dao[]; incide
                   </div>
                   <span className="eyebrow shrink-0">#{dao.dao_id}</span>
                 </div>
-                <p className={`relative mt-4 inline-flex rounded-full border px-2.5 py-0.5 text-[12px] font-semibold ${shield.tone}`}>
-                  {shield.label}
-                </p>
+                <div className="relative mt-4 flex flex-wrap gap-2">
+                  <p className={`inline-flex rounded-full border px-2.5 py-0.5 text-[12px] font-semibold ${shield.tone}`}>
+                    {shield.label}
+                  </p>
+                  {dao.verification === "VERIFIED" ? (
+                    <p
+                      className="inline-flex rounded-full border border-sky-400/40 bg-sky-400/10 px-2.5 py-0.5 text-[12px] font-semibold text-sky"
+                      title={`Timelock admin() is the declared governor ${dao.governor}`}
+                    >
+                      Verified governor
+                    </p>
+                  ) : (
+                    <p
+                      className="inline-flex rounded-full border border-orange-400/50 bg-orange-400/15 px-2.5 py-0.5 text-[12px] font-semibold text-suspicious"
+                      title={`Timelock admin() is ${dao.timelock_admin || "unreadable"}, not ${dao.governor}`}
+                    >
+                      Unverified registrar
+                    </p>
+                  )}
+                </div>
                 <dl className="relative mt-4 grid grid-cols-3 gap-2 text-center">
                   {(
                     [

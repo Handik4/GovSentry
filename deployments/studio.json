@@ -2,59 +2,90 @@
   "network": "studio_next",
   "chain_id": 61997,
   "rpc_url": "https://studio-next.genlayer.com/api",
-  "contract_address": "0x23e4Ccd46b851E00eb28e2f9974A34Cfa78257B5",
-  "deploy_tx_hash": "0x292725cd0bc6fbb63f56dabeb952d7ab6349389da861b5991e7a92534db04096",
+  "contract_address": "0xc5129C89Ce847bd361B463092bAd40E380867bd8",
+  "deploy_tx_hash": "0x5507b9d7750e7e852093f27218f9c5453a3cb49630d65f576bdf50f27dbe510b",
   "deployer": "0x8cCbbfd8A809b4D1953aBB059749D7B67E3B972C",
-  "explorer_url": "https://explorer-studio-next.genlayer.com/address/0x23e4Ccd46b851E00eb28e2f9974A34Cfa78257B5",
-  "deploy_tx_url": "https://explorer-studio-next.genlayer.com/tx/0x292725cd0bc6fbb63f56dabeb952d7ab6349389da861b5991e7a92534db04096",
+  "explorer_url": "https://explorer-studio-next.genlayer.com/address/0xc5129C89Ce847bd361B463092bAd40E380867bd8",
+  "deploy_tx_url": "https://explorer-studio-next.genlayer.com/tx/0x5507b9d7750e7e852093f27218f9c5453a3cb49630d65f576bdf50f27dbe510b",
   "source": "contracts/gov_sentry.py",
-  "source_sha256": "86422f824a26049daffc6c929f13c091f635ed93b04cb1bdca330a89e7921ca0",
+  "source_sha256": "c4656b78b192ebce4076adfab213348882ea789da0f5172b3d8f929ce3841a2b",
   "runner": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng",
-  "deployed_at": "2026-09-24T04:36:41Z",
-  "bootstrap": [
-    {
-      "method": "register_dao",
-      "tx_hash": "0x2c409cef7accf081a1438ddd6bdbbcf3e3d8b57465cb69ad152054368a00e40c",
-      "state": "finalized",
-      "consensus": "MAJORITY_AGREE",
-      "execution": "FINISHED_WITH_RETURN",
-      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x2c409cef7accf081a1438ddd6bdbbcf3e3d8b57465cb69ad152054368a00e40c"
-    },
-    {
-      "method": "register_selectors",
-      "tx_hash": "0x79074587997a7cb0783f4dac56c342a1b4d40d4d9fbd47c681eaedd8ce87e874",
-      "state": "finalized",
-      "consensus": "MAJORITY_AGREE",
-      "execution": "FINISHED_WITH_RETURN",
-      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x79074587997a7cb0783f4dac56c342a1b4d40d4d9fbd47c681eaedd8ce87e874"
-    },
-    {
-      "method": "fund_bounty_escrow",
-      "tx_hash": "0xdc197b08c1fa4b35f835a6176ae91da52dcb865c60e7700a1b954cb9b207902d",
-      "state": "finalized",
-      "consensus": "MAJORITY_AGREE",
-      "execution": "FINISHED_WITH_RETURN",
-      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0xdc197b08c1fa4b35f835a6176ae91da52dcb865c60e7700a1b954cb9b207902d"
-    }
-  ],
-  "bootstrap_dao": {
-    "dao_id": 1,
-    "target_timelock": "0x6d903f6003cca6255D85CcA4D3B5E5146dC33925",
-    "name": "Compound Governance Timelock",
-    "description_url": "https://compound.finance/governance"
-  },
   "deploy_status": {
     "state": "finalized",
     "consensus": "MAJORITY_AGREE",
     "execution": "FINISHED_WITH_RETURN"
   },
+  "deployed_at": "2026-09-24T17:27:31Z",
+  "bootstrap": [
+    {
+      "method": "set_chain_rpc",
+      "tx_hash": "0x5bd0edc9d3cf2d76feddaaca2d2f1edc3d42a9af5730e086c2ae63ab9b0b0d4f",
+      "state": "finalized",
+      "consensus": "MAJORITY_AGREE",
+      "execution": "FINISHED_WITH_RETURN",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x5bd0edc9d3cf2d76feddaaca2d2f1edc3d42a9af5730e086c2ae63ab9b0b0d4f"
+    },
+    {
+      "method": "set_chain_rpc",
+      "tx_hash": "0x1b6758a27a61b60907ac82396f278c62638bc00edc0dde6da03d20c2a4d3a6f0",
+      "state": "finalized",
+      "consensus": "MAJORITY_AGREE",
+      "execution": "FINISHED_WITH_RETURN",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x1b6758a27a61b60907ac82396f278c62638bc00edc0dde6da03d20c2a4d3a6f0",
+      "note": "switch chain 1 RPC to https://rpc.mevblocker.io"
+    },
+    {
+      "method": "register_dao",
+      "tx_hash": "0x75e38811bae8e33eccb4e65e31f6bdf2d4acff1f10cff3e45bfdbd8904f5c0a4",
+      "state": "finalized",
+      "consensus": "MAJORITY_AGREE",
+      "execution": "FINISHED_WITH_RETURN",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x75e38811bae8e33eccb4e65e31f6bdf2d4acff1f10cff3e45bfdbd8904f5c0a4"
+    },
+    {
+      "method": "register_selectors",
+      "tx_hash": "0x727c2e2188dfbc64029044a1a32e3e5156dab42f68fc2e6d1ed6ee5987e980c6",
+      "state": "finalized",
+      "consensus": "MAJORITY_AGREE",
+      "execution": "FINISHED_WITH_RETURN",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x727c2e2188dfbc64029044a1a32e3e5156dab42f68fc2e6d1ed6ee5987e980c6"
+    },
+    {
+      "method": "fund_bounty_escrow",
+      "tx_hash": "0x15cf40743d1c384f5c4569dfc645fe7662d9c014943677691c1544240436028d",
+      "state": "finalized",
+      "consensus": "MAJORITY_AGREE",
+      "execution": "FINISHED_WITH_RETURN",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x15cf40743d1c384f5c4569dfc645fe7662d9c014943677691c1544240436028d"
+    },
+    {
+      "method": "register_selectors",
+      "tx_hash": "0xec7edd35b360b9258fad39fa42be9cba20e4e75c797aa5d2338d15e1fb5b6578",
+      "state": "finalized",
+      "consensus": "MAJORITY_AGREE",
+      "execution": "FINISHED_WITH_RETURN",
+      "note": "adds setVersion selector"
+    }
+  ],
+  "bootstrap_dao": {
+    "dao_id": 1,
+    "target_timelock": "0x6d903f6003cca6255D85CcA4D3B5E5146dC33925",
+    "governor": "0x309a862bbc1a00e45506cb8a802d1ff10004c8c0",
+    "chain_id": 1,
+    "name": "Compound Governance Timelock",
+    "description_url": "https://compound.finance/governance",
+    "chain_rpc": "https://rpc.mevblocker.io"
+  },
   "demo_incident": {
-    "method": "flag_proposal",
-    "tx_hash": "0x22e92c37487d5fb13a4356e9e586aec03058fb308c74fa9e5cbf91f8db5c8ffa",
+    "method": "report_proposal",
+    "proposal_id": 609,
+    "action_index": 0,
+    "created_block": 26024021,
+    "tx_hash": "0x8b986d8eee02462603282e945c0cf263e396b566da0d08517d8f420a72276c52",
     "state": "finalized",
     "consensus": "MAJORITY_AGREE",
     "execution": "FINISHED_WITH_RETURN",
-    "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x22e92c37487d5fb13a4356e9e586aec03058fb308c74fa9e5cbf91f8db5c8ffa",
-    "classification": "CRITICAL_MALICIOUS_PAYLOAD"
+    "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x8b986d8eee02462603282e945c0cf263e396b566da0d08517d8f420a72276c52",
+    "classification": "SUSPICIOUS_OMISSION"
   }
 }

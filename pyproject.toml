@@ -1,6 +1,6 @@
 [project]
 name = "govsentry"
-version = "0.1.0"
+version = "0.3.0"
 description = "Autonomous malicious DAO governance proposal interceptor on GenLayer GenVM."
 readme = "README.md"
 license = { text = "MIT" }

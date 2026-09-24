@@ -10,6 +10,7 @@ from conftest import (
     CALLDATA_SET_FEE,
     CHALLENGE_WINDOW,
     CONTRACT,
+    GOVERNOR,
     ESCROW,
     PROSE_DECEPTIVE,
     PROSE_HONEST,
@@ -19,6 +20,7 @@ from conftest import (
     appeal,
     assert_solvent,
     bound_rebuttal,
+    deploy,
     flag,
     hex_of,
     mock_appeal,
@@ -35,7 +37,7 @@ BOUNTY_SUSPICIOUS = 1 * ATTO
 
 @pytest.fixture
 def env(direct_vm, direct_deploy, direct_alice):
-    contract = direct_deploy(CONTRACT)
+    contract = deploy(direct_deploy)
     t0 = start_clock(direct_vm)
     dao_id = register(contract, direct_vm, direct_alice)
     return contract, t0, dao_id
@@ -52,6 +54,9 @@ def test_register_dao_records_target_and_escrow(env, direct_alice):
     assert dao["registrant"].lower() == hex_of(direct_alice).lower()
     assert int(dao["bounty_escrow"]) == ESCROW
     assert dao["registered_at"] == t0
+    assert dao["governor"] == GOVERNOR
+    assert dao["verification"] == "VERIFIED"
+    assert dao["timelock_admin"] == GOVERNOR
     ledger = assert_solvent(contract)
     assert int(ledger["total_deposited"]) == ESCROW
     assert int(ledger["total_bonded"]) == ESCROW
@@ -59,9 +64,9 @@ def test_register_dao_records_target_and_escrow(env, direct_alice):
 
 def test_register_duplicate_timelock_rejected(env, direct_vm, direct_bob):
     contract, _, _ = env
-    direct_vm.sender = direct_bob
     with direct_vm.expect_revert("ERR_DUPLICATE_DAO"):
-        contract.register_dao(TIMELOCK.upper().replace("0X", "0x"), "Clone", "https://x.org")
+        register(contract, direct_vm, direct_bob, timelock=TIMELOCK.upper().replace("0X", "0x"))
+    direct_vm.value = 0
 
 
 def test_register_selectors_extends_disassembly(env, direct_vm, direct_alice):

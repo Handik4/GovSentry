@@ -18,10 +18,10 @@ function stages(c: Constants | null): Stage[] {
     {
       title: "Calldata Ingestion & Disassembly",
       icon: IconBytes,
-      summary: "Every node decodes the proposal's bytes identically before any model is consulted.",
+      summary: "Validators read the proposal from the DAO's governor on-chain, then decode its bytes identically.",
       detail: [
-        "Strict validation: 0x prefix, a non-null 4-byte selector, whole 32-byte argument words.",
-        "Selectors resolve against a privileged-call table and the DAO's own verified ABI.",
+        "Reporters only name a proposal action; its calldata and description come from the governor via web consensus.",
+        "Selectors resolve against an immutable privileged-call table and the DAO's hash-checked ABI.",
         "The decoded call becomes fixed ground truth in the prompt, so the model judges facts, not raw hex.",
       ],
     },
@@ -109,8 +109,9 @@ export function AboutModal({ open, onClose, constants }: { open: boolean; onClos
           Governance takeovers rarely look like takeovers. They pass because voters read the description, and the
           description says <em>routine parameter update</em> while the calldata calls <code className="font-mono text-sky">transferOwnership</code>,
           mints supply, or drains the treasury. GovSentry puts that gap on trial. Anyone can post a bond and flag a
-          proposal; GenLayer validators decode the call, compare it with the prose, and reach a public verdict while the
-          target timelock is still waiting. Honest reporters are paid from the DAO's bounty escrow, and every verdict can
+          proposal; GenLayer validators read it from the DAO's chain, decode the call, compare it with the prose, and
+          reach a public verdict while the target timelock is still waiting. GovSentry is a firewall that raises the
+          alarm, not a hand on the timelock: a DAO Guardian or pause module acts on the verdict. Honest reporters are paid from the DAO's bounty escrow, and every verdict can
           be challenged by someone willing to put GEN behind their rebuttal.
         </p>
 
