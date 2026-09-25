@@ -1,9 +1,9 @@
 import { useEffect, useId, useState } from "react";
 import { dryRunReport, view } from "../lib/genlayer";
-import { explainError } from "../lib/copy";
-import { gen, parseGen } from "../lib/format";
-import type { Constants, Dao, Disassembly, DryRun } from "../lib/types";
-import type { Session } from "../hooks/useSession";
+import { explainError, STATUS_LABEL, VERDICT_LABEL } from "../lib/copy";
+import { gen, parseGen, sameAddress } from "../lib/format";
+import type { Constants, Dao, Disassembly, DryRun, Incident } from "../lib/types";
+import type { Confirm, Session } from "../hooks/useSession";
 import { Dissection } from "./Dissection";
 import { VerdictBadge } from "./Verdict";
 
@@ -22,7 +22,7 @@ export function FlagForm({
   daos: Dao[];
   constants: Constants | null;
   session: Session;
-  onFlagged: () => void;
+  onFlagged: (incidentId: number) => void;
 }) {
   const ids = useId();
   const verified = daos.filter((d) => d.verification === "VERIFIED");
@@ -105,9 +105,26 @@ export function FlagForm({
           e.preventDefault();
           if (!ready || bond === null) return;
           const label = `Flag proposal #${proposalId.trim()} action ${actionIndex.trim()}`;
-          const ok = await session.run(label, "report_proposal", args(), bond);
+          const [, pid, aidx] = args();
+          const reporter = session.signer?.address;
+          // Acceptance alone is not enough: read the incident the call returned
+          // back from contract state and check it is this report.
+          const confirm: Confirm = async (receipt) => {
+            const raw = receipt.returnValue;
+            const id = typeof raw === "bigint" || typeof raw === "number" ? Number(raw) : NaN;
+            if (!Number.isInteger(id) || id <= 0) throw new Error("Validators accepted the call, but it returned no incident id.");
+            const incident = await view<Incident>("get_incident", [id]);
+            if (!sameAddress(incident.reporter, reporter) || incident.proposal_id !== pid || incident.action_index !== aidx) {
+              throw new Error(`Incident #${id} in contract state does not match this report.`);
+            }
+            onFlagged(id);
+            return {
+              text: `Incident #${id} read back from contract state: ${VERDICT_LABEL[incident.classification]}, ${STATUS_LABEL[incident.status].toLowerCase()}.`,
+              incidentId: id,
+            };
+          };
+          const ok = await session.run(label, "report_proposal", args(), bond, confirm);
           if (ok) {
-            onFlagged();
             setProposalId("");
             setActionIndex("0");
             setCreatedBlock("");
@@ -245,12 +262,33 @@ export function FlagForm({
               <button type="submit" className="btn btn-primary" disabled={!ready || busy || !session.signer}>
                 Flag and post {bond === null ? "" : `${gen(bond)} GEN`} bond
               </button>
+              {!session.signer ? (
+                <button
+                  type="button"
+                  className="btn btn-quiet"
+                  disabled={busy}
+                  onClick={() => {
+                    const label = ready ? `Guest: flag proposal #${proposalId.trim()} action ${actionIndex.trim()}` : "Guest: flag a proposal";
+                    // With a complete form the leader step runs a real one-validator dry run.
+                    const work =
+                      ready && bond !== null
+                        ? async () => {
+                            const r = await dryRunReport(args(), bond);
+                            return `Leader dry run verdict: ${VERDICT_LABEL[r.verdict.classification]}. Simulated incident only; nothing was posted on-chain.`;
+                          }
+                        : undefined;
+                    void session.simulate(label, work);
+                  }}
+                >
+                  Walk through consensus (guest)
+                </button>
+              ) : null}
             </div>
             <p className="mt-2 text-[12px] text-muted" aria-live="polite">
               {!complete
                 ? "Fill in every field to run a dry run or flag."
                 : !session.signer
-                  ? "The dry run is free and needs no wallet. Connect to flag."
+                  ? "The dry run is free and needs no wallet. Connect to flag, or walk through the consensus lifecycle as a guest."
                   : "The dry run simulates one validator without posting anything."}
             </p>
           </div>

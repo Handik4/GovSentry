@@ -171,25 +171,237 @@ export async function balanceOf(address: Hex): Promise<bigint> {
 
 // -------------------------------------------------------------- writes
 
-export type WritePhase = "checking" | "signing" | "consensus" | "done";
+export type WritePhase = "checking" | "signing" | "broadcast" | "consensus" | "confirming" | "done";
 
-export interface WriteResult {
+export interface VoteTally {
+  agree: number;
+  disagree: number;
+  timeout: number;
+  idle: number;
+  total: number;
+}
+
+/** Live view of a transaction while validators work on it. */
+export interface ConsensusProgress {
+  status: string;
+  votes: VoteTally | null;
+}
+
+/** The canonical record of a decided transaction, as the network stores it. */
+export interface ConsensusReceipt {
   hash: Hex;
-  execution: string | undefined;
+  /** Stored lifecycle status: ACCEPTED, FINALIZED, UNDETERMINED, … */
+  status: string;
+  /** Round result, e.g. MAJORITY_AGREE. */
+  consensus: string | null;
+  /** GenVM execution result, e.g. FINISHED_WITH_RETURN. */
+  execution: string | null;
+  votes: VoteTally | null;
+  /** Unix seconds when validators materialized the decision. */
+  decidedAt: number | null;
+  /** Unix seconds when the appeal window closed and the decision became final. */
+  finalizedAt: number | null;
+  appealDeadline: number | null;
+  decisionId: number | null;
+  /** Null on Studio networks, which order transactions without blocks. */
+  block: number | null;
+  returnValue: unknown;
+  /** The validators' own reason when the transaction did not succeed. */
+  failure: string | null;
+}
+
+export class ConsensusError extends Error {
+  readonly receipt: ConsensusReceipt;
+  constructor(message: string, receipt: ConsensusReceipt) {
+    super(message);
+    this.receipt = receipt;
+  }
+}
+
+// Numeric status codes, in protocol order.
+const STATUS_NAMES = [
+  "UNINITIALIZED", "PENDING", "PROPOSING", "COMMITTING", "REVEALING", "ACCEPTED", "UNDETERMINED",
+  "FINALIZED", "CANCELED", "APPEAL_REVEALING", "APPEAL_COMMITTING", "VALIDATORS_TIMEOUT", "LEADER_TIMEOUT",
+  "LEADER_REVEALING",
+];
+const DECIDED = new Set(["ACCEPTED", "FINALIZED", "UNDETERMINED", "CANCELED", "VALIDATORS_TIMEOUT", "LEADER_TIMEOUT"]);
+const AGREED = new Set(["ACCEPTED", "FINALIZED"]);
+
+const STATUS_FAILURE: Record<string, string> = {
+  UNDETERMINED: "Validators could not reach a majority on the leader's result, so nothing was committed.",
+  LEADER_TIMEOUT: "The leader validator timed out before proposing a result.",
+  VALIDATORS_TIMEOUT: "Too many validators timed out before voting.",
+  CANCELED: "The transaction was canceled before consensus.",
+};
+const RESULT_FAILURE: Record<string, string> = {
+  MAJORITY_DISAGREE: "A majority of validators disagreed with the leader's result.",
+  NO_MAJORITY: "Validators split with no majority.",
+  MAJORITY_TIMEOUT: "A majority of validators timed out.",
+  DETERMINISTIC_VIOLATION: "Validators detected a deterministic violation in the leader's execution.",
+};
+
+type RawTx = Record<string, unknown> & {
+  status?: string | number;
+  result_name?: string;
+  txExecutionResultName?: string;
+  last_vote_timestamp?: string | number;
+  last_round?: { validator_votes_name?: string[] };
+  consensus_data?: {
+    votes?: Record<string, string>;
+    leader_receipt?: { result?: string; genvm_result?: { error_description?: string | null; stderr?: string } }[];
+  };
+  consensus_history?: {
+    latestDecision?: { decisionId?: number; appealDeadline?: number; materializedAt?: number } | null;
+    consensus_results?: { monitoring?: Record<string, number> }[];
+  };
+};
+
+async function rpc<T>(method: string, params: unknown[]): Promise<T> {
+  const res = await fetch(CONFIG.rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const json = (await res.json()) as { result?: T; error?: { message?: string } };
+  if (json.error) throw new Error(json.error.message ?? `${method} failed`);
+  return json.result as T;
+}
+
+function statusName(raw: RawTx): string {
+  const s = raw.status;
+  if (typeof s === "number") return STATUS_NAMES[s] ?? String(s);
+  if (s === "ACTIVATED") return "PENDING";
+  return s ?? "PENDING";
+}
+
+function tally(raw: RawTx): VoteTally | null {
+  const names = raw.last_round?.validator_votes_name ?? Object.values(raw.consensus_data?.votes ?? {});
+  if (!names.length) return null;
+  const t: VoteTally = { agree: 0, disagree: 0, timeout: 0, idle: 0, total: names.length };
+  for (const n of names.map((x) => x.toLowerCase())) {
+    if (n === "agree" || n === "finished_with_return") t.agree++;
+    else if (n === "timeout") t.timeout++;
+    else if (n === "idle" || n === "not_voted") t.idle++;
+    else t.disagree++;
+  }
+  return t;
+}
+
+const seconds = (v: unknown) => (v === undefined || v === null || v === "" ? null : Math.floor(Number(v)));
+
+/** Decode the leader's result: a status byte (0 = return, 1/2 = error) then the payload. */
+function leaderResult(raw: RawTx): { value?: unknown; error?: string } {
+  const receipt = raw.consensus_data?.leader_receipt?.[0];
+  if (!receipt?.result) return {};
+  const bytes = base64Bytes(receipt.result);
+  if (bytes[0] === 0) {
+    try {
+      return { value: toPlain(abi.calldata.decode(bytes.slice(1))) };
+    } catch {
+      return {};
+    }
+  }
+  const msg = decoder.decode(bytes.slice(1)) || receipt.genvm_result?.error_description || receipt.genvm_result?.stderr;
+  return { error: msg || undefined };
+}
+
+async function blockNumber(hash: Hex): Promise<number | null> {
+  try {
+    const r = await rpc<{ blockNumber?: string } | null>("eth_getTransactionReceipt", [hash]);
+    const n = r?.blockNumber ? Number(BigInt(r.blockNumber)) : 0;
+    return n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readReceipt(hash: Hex, raw: RawTx): Promise<ConsensusReceipt> {
+  const status = statusName(raw);
+  const decision = raw.consensus_history?.latestDecision ?? null;
+  const results = raw.consensus_history?.consensus_results ?? [];
+  const monitoring = results[results.length - 1]?.monitoring ?? {};
+  const consensus = raw.result_name ?? null;
+  const execution = raw.txExecutionResultName ?? null;
+  const leader = leaderResult(raw);
+
+  let failure: string | null = null;
+  if (!AGREED.has(status)) failure = STATUS_FAILURE[status] ?? `Consensus ended in ${status}.`;
+  else if (consensus && RESULT_FAILURE[consensus]) failure = RESULT_FAILURE[consensus];
+  else if (execution && execution !== "FINISHED_WITH_RETURN") failure = leader.error ?? `GenVM execution ended with ${execution}.`;
+  if (failure && leader.error && !failure.includes(leader.error)) failure = `${failure} Leader reported: ${leader.error}`;
+
+  return {
+    hash,
+    status,
+    consensus,
+    execution,
+    votes: tally(raw),
+    decidedAt: seconds(decision?.materializedAt ?? monitoring.ACCEPTED ?? raw.last_vote_timestamp),
+    finalizedAt: status === "FINALIZED" ? seconds(monitoring.FINALIZED ?? decision?.appealDeadline) : null,
+    appealDeadline: seconds(decision?.appealDeadline),
+    decisionId: decision?.decisionId ?? null,
+    block: await blockNumber(hash),
+    returnValue: leader.value,
+    failure,
+  };
+}
+
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Poll the stored transaction until validators decide it, reporting every
+ * status change on the way. Resolves with the canonical receipt; it never
+ * treats submission alone as success.
+ */
+export async function awaitConsensus(
+  hash: Hex,
+  onProgress: (p: ConsensusProgress) => void,
+  { interval = 2500, timeoutMs = 10 * 60_000 } = {},
+): Promise<ConsensusReceipt> {
+  const deadline = Date.now() + timeoutMs;
+  let last = "";
+  while (Date.now() < deadline) {
+    const raw = await rpc<RawTx | null>("eth_getTransactionByHash", [hash]).catch(() => null);
+    if (raw) {
+      const status = statusName(raw);
+      const votes = tally(raw);
+      const key = `${status}:${votes ? `${votes.agree}/${votes.disagree}/${votes.timeout}` : ""}`;
+      if (key !== last) {
+        last = key;
+        onProgress({ status, votes });
+      }
+      if (DECIDED.has(status)) return readReceipt(hash, raw);
+    }
+    await pause(interval);
+  }
+  throw new Error("Validators have not decided this transaction after 10 minutes. It may still settle; check the explorer.");
+}
+
+/** After acceptance, follow the transaction until its appeal window closes and it is final. */
+export async function awaitFinality(hash: Hex, { interval = 5000, timeoutMs = 5 * 60_000 } = {}): Promise<ConsensusReceipt | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const raw = await rpc<RawTx | null>("eth_getTransactionByHash", [hash]).catch(() => null);
+    if (raw && statusName(raw) !== "ACCEPTED") return readReceipt(hash, raw);
+    await pause(interval);
+  }
+  return null;
 }
 
 /**
  * Pre-flight the call as a simulation so reverts surface with the contract's
  * own reason before anything is signed, then submit with a fee distribution
- * estimated from the network's live fee policy and wait for a decision.
+ * estimated from the network's live fee policy and follow it through
+ * consensus. Throws ConsensusError unless validators accepted a successful
+ * execution.
  */
 export async function write(
   signer: Signer,
   functionName: string,
   args: CallArg[],
   value: bigint,
-  onPhase: (p: WritePhase, hash?: Hex) => void,
-): Promise<WriteResult> {
+  onPhase: (p: WritePhase, hash?: Hex, progress?: ConsensusProgress) => void,
+): Promise<ConsensusReceipt> {
   onPhase("checking");
   try {
     await signer.client.simulateWriteContract({ address: CONFIG.address, functionName, args, value });
@@ -207,15 +419,10 @@ export async function write(
     fees,
   })) as Hex;
 
-  onPhase("consensus", hash);
-  const receipt = (await signer.client.waitForTransactionReceipt({
-    hash: hash as Parameters<Client["waitForTransactionReceipt"]>[0]["hash"],
-    waitUntil: "decided",
-    interval: 3000,
-    retries: 200,
-  })) as { txExecutionResultName?: string };
-  onPhase("done", hash);
-  return { hash, execution: receipt.txExecutionResultName };
+  onPhase("broadcast", hash);
+  const receipt = await awaitConsensus(hash, (p) => onPhase("consensus", hash, p));
+  if (receipt.failure) throw new ConsensusError(receipt.failure, receipt);
+  return receipt;
 }
 
 // ------------------------------------------------------------- dry run

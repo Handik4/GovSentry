@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { explorerAddress } from "../config";
+import { explorerAddress, explorerTx } from "../config";
 import { APPEAL_LABEL, STATUS_LABEL } from "../lib/copy";
 import { duration, gen, parseGen, sameAddress, short, timestamp } from "../lib/format";
 import type { Constants, Dao, Incident } from "../lib/types";
 import type { Session } from "../hooks/useSession";
+import type { ConsensusReceipt } from "../lib/genlayer";
 import { Dissection } from "./Dissection";
 import { VerdictBadge } from "./Verdict";
 import { isLive } from "../lib/verdictStyle";
@@ -108,6 +109,80 @@ function Timeline({ steps, incident, now, windowSeconds }: { steps: Step[]; inci
           </li>
         ))}
       </ol>
+    </section>
+  );
+}
+
+/**
+ * The canonical consensus record for this incident. The contract does not
+ * store the creating transaction, so the full receipt is shown when this
+ * browser filed the report; otherwise the contract's own record stands in.
+ */
+function OnChainRecord({ incident, receipt }: { incident: Incident; receipt: ConsensusReceipt | undefined }) {
+  const final = receipt?.status === "FINALIZED";
+  return (
+    <section aria-label="On-chain consensus record" className="glass-card p-4 sm:p-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="eyebrow">On-chain record</p>
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-aligned/50 bg-aligned/10 px-2.5 py-0.5 text-xs font-semibold text-aligned">
+          ✓ Consensus Confirmed (On-Chain)
+        </span>
+      </div>
+      <dl className="mt-3 grid gap-x-6 gap-y-1.5 text-[13px] sm:grid-cols-2">
+        {receipt ? (
+          <>
+            <div className="flex justify-between gap-3">
+              <dt className="text-muted">Transaction</dt>
+              <dd className="font-mono">
+                <a className="text-sky hover:underline" href={explorerTx(receipt.hash)} target="_blank" rel="noreferrer">
+                  {short(receipt.hash, 10, 6)} ↗
+                </a>
+              </dd>
+            </div>
+            <div className="flex justify-between gap-3">
+              <dt className="text-muted">Consensus</dt>
+              <dd className="font-mono">{[receipt.status, receipt.consensus].filter(Boolean).join(" · ")}</dd>
+            </div>
+            <div className="flex justify-between gap-3">
+              <dt className="text-muted">Decided</dt>
+              <dd className="font-mono">{receipt.decidedAt ? new Date(receipt.decidedAt * 1000).toLocaleString() : "unknown"}</dd>
+            </div>
+            <div className="flex justify-between gap-3">
+              <dt className="text-muted">Finality</dt>
+              <dd className="font-mono">
+                {final
+                  ? receipt.finalizedAt ? new Date(receipt.finalizedAt * 1000).toLocaleString() : "Finalized"
+                  : "Accepted, appeal window open"}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-3">
+              <dt className="text-muted">Block</dt>
+              <dd className="font-mono">{receipt.block ?? `n/a (blockless)${receipt.decisionId !== null ? ` · decision #${receipt.decisionId}` : ""}`}</dd>
+            </div>
+            <div className="flex justify-between gap-3">
+              <dt className="text-muted">Validators</dt>
+              <dd className="font-mono">{receipt.votes ? `${receipt.votes.agree}/${receipt.votes.total} agree` : "unknown"}</dd>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="flex justify-between gap-3">
+              <dt className="text-muted">Recorded</dt>
+              <dd className="font-mono">{new Date(incident.flagged_at * 1000).toLocaleString()}</dd>
+            </div>
+            <div className="flex justify-between gap-3">
+              <dt className="text-muted">Source</dt>
+              <dd className="font-mono">contract state</dd>
+            </div>
+          </>
+        )}
+      </dl>
+      {!receipt ? (
+        <p className="mt-2 text-[12px] text-muted">
+          This incident exists in contract state, which only accepted transactions can write. The creating transaction's
+          receipt is shown for reports filed from this browser.
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -278,6 +353,8 @@ export function IncidentDossier({
         </div>
         <VerdictBadge verdict={i.classification} size="md" live={isLive(i.status)} />
       </header>
+
+      <OnChainRecord incident={i} receipt={session.receipts[i.incident_id]} />
 
       <Dissection
         prose={i.prose_description}

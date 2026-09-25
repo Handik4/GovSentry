@@ -39,7 +39,7 @@ export default function App() {
   const protocol = useProtocol();
   const { refresh } = protocol;
   const now = useNow();
-  const onSettled = useCallback(() => void refresh(), [refresh]);
+  const onSettled = useCallback(() => refresh(), [refresh]);
   const session = useSession(onSettled);
   const [selected, setSelected] = useState<number | null>(null);
   // `#about` deep-links straight to the About dialog.
@@ -51,7 +51,8 @@ export default function App() {
 
   const { dismissTx, tx } = session;
   useEffect(() => {
-    if (tx?.phase !== "done") return;
+    // Only the faucet toast clears itself; consensus receipts stay until dismissed.
+    if (tx?.phase !== "done" || !tx.plain) return;
     const t = window.setTimeout(dismissTx, 6000);
     return () => window.clearTimeout(t);
   }, [tx, dismissTx]);
@@ -139,7 +140,7 @@ export default function App() {
         <section id="flag" className="pt-16">
           <div className="glass-card glow p-5 sm:p-7">
             <div className="relative">
-              <FlagForm daos={protocol.daos} constants={protocol.constants} session={session} onFlagged={() => setSelected(null)} />
+              <FlagForm daos={protocol.daos} constants={protocol.constants} session={session} onFlagged={setSelected} />
             </div>
           </div>
         </section>
